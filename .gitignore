@@ -6,3 +6,6 @@ __pycache__/
 # secrets
 *tockenBot*.txt
 *tokenBot*.txt
+
+# logs
+logs/

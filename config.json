@@ -1,0 +1,40 @@
+{
+  "jasmine_filter": {
+    "enabled": true,
+    "check_interval_seconds": 30,
+    "last_n_messages": 50,
+    "ollama": {
+      "url": "http://127.0.0.1:11434/api/chat",
+      "model": "phi4-mini:latest"
+    },
+    "lm_studio": {
+      "url": "http://127.0.0.1:1234/v1/chat/completions",
+      "model": "openai/gpt-oss-20b"
+    },
+    "bot_name": "Жасмін",
+    "bot_name_variations": ["жасмін", "jasmine", "jasmine", "жасміна"],
+    "response_coefficients": {
+      "industries": [
+        {
+          "name": "IT та технології",
+          "coefficient": 0.7,
+          "keywords": ["програмування", "код", "розробка", "IT", "технології", "комп'ютер", "софт", "програма", "скрипт", "алгоритм"]
+        },
+        {
+          "name": "Загальні питання",
+          "coefficient": 0.5,
+          "keywords": ["питання", "допоможи", "підкажи", "як", "що", "чому", "де", "коли"]
+        },
+        {
+          "name": "Розваги",
+          "coefficient": 0.3,
+          "keywords": ["жарт", "анекдот", "сміх", "розвага", "гра", "фільм", "музика"]
+        }
+      ],
+      "default_coefficient": 0.4
+    }
+  },
+  "kg_watch": {
+    "enabled": true
+  }
+}
