@@ -9,3 +9,19 @@ __pycache__/
 
 # logs
 logs/
+
+# knowledge graph data
+kg/graph.json
+kg/*.ark
+kg/*.npz
+
+# model files
+*.pth
+*.pt
+
+# test outputs
+test_*.wav
+test_*.json
+jasmine_processed.json
+feats_stats.npz
+spk_xvector.ark
