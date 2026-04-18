@@ -169,40 +169,56 @@ def get_last_messages(n: int) -> List[Dict]:
 def classify_with_ollama(text: str, config: dict) -> Tuple[bool, bool, str]:
     """
     Класифікує повідомлення через Ollama.
-    
+
     Returns:
         (is_jasmine_address, is_question, explanation)
     """
     ollama_config = config["jasmine_filter"]["ollama"]
     bot_name = config["jasmine_filter"]["bot_name"]
     variations = config["jasmine_filter"]["bot_name_variations"]
-    
-    # Формуємо промпт для класифікації
-    prompt = f"""Ти — класифікатор повідомлень для сімейного чат-бота на ім'я "{bot_name}".
-Аналізуй повідомлення та поверни JSON з двома булевими полями:
-- "is_jasmine_address": чи є це прямим зверненням до бота {bot_name} (використовуються імена: {', '.join(variations)})
-- "is_question": чи це питання або запит, де велика мовна модель (20Б параметрів) може допомогти
 
-Поверни ТІЛЬКИ JSON, без жодного пояснення.
+    # Формуємо промпт для класифікації з більш суворими критеріями
+    prompt = f"""Ти — класифікатор повідомлень для сімейного чат-бота на ім'я "{bot_name}".
+Твоя задача - точно визначати коли боту слід відповідати, а коли ні.
+
+Правила для is_jasmine_address:
+- True тільки якщо є пряме звернення до бота за іменем: {', '.join(variations)}
+- False для будь-яких інших повідомлень
+
+Правила для is_question:
+- True тільки якщо це пряме прохання про допомогу/пораду/інформацію
+- False для:
+  * Простих повідомлень без питання
+  * Привітань/побажань
+  * Сарказму/жартів без прохання про допомогу
+  * Загальних фраз на кшталт "як справи", "що нового"
+  * Повідомлень які не вимагають інтелектуальної відповіді
+
+Поверни ТІЛЬКИ JSON з двома булевими полями:
+- "is_jasmine_address": true/false
+- "is_question": true/false
+
+Без жодного пояснення, тільки JSON.
 
 Повідомлення: {text}"""
-    
+
     try:
         response = requests.post(
             ollama_config["url"],
             json={
                 "model": ollama_config["model"],
                 "messages": [{"role": "user", "content": prompt}],
-                "stream": False
+                "stream": False,
+                "temperature": 0.1  # Низька температура для стабільної класифікації
             },
             timeout=30
         )
         response.raise_for_status()
         result = response.json()
-        
+
         # Ollama повертає response у форматі {"message": {"content": "..."}}
         content = result.get("message", {}).get("content", "{}")
-        
+
         # Парсимо JSON з відповіді
         try:
             classification = json.loads(content)
@@ -213,7 +229,7 @@ def classify_with_ollama(text: str, config: dict) -> Tuple[bool, bool, str]:
         except json.JSONDecodeError:
             # Якщо Ollama не повернув коректний JSON, пробуємо простий аналіз
             return simple_classify(text, bot_name, variations)
-            
+
     except Exception as e:
         print(f"[Jasmine] Ollama error: {e}")
         # Fallback до простого аналізу
@@ -223,16 +239,29 @@ def classify_with_ollama(text: str, config: dict) -> Tuple[bool, bool, str]:
 def simple_classify(text: str, bot_name: str, variations: List[str]) -> Tuple[bool, bool, str]:
     """
     Простий аналіз тексту без Ollama (fallback).
+    Консервативний підхід - за замовчуванням не відповідаємо.
     """
     text_lower = text.lower()
-    
+
     # Перевіряємо на звернення до бота
     is_jasmine = any(var in text_lower for var in variations)
-    
-    # Перевіряємо на питання (прості евристики)
-    question_indicators = ['?', 'що', 'чому', 'як', 'де', 'коли', 'хто', 'скільки', 'чи', 'допомож', 'підкаж', 'розкаж']
-    is_question = any(indicator in text_lower for indicator in question_indicators)
-    
+
+    # За замовчуванням не вважаємо питанням
+    is_question = False
+
+    # Тільки пряме звернення за допомогою з "мені" вважається питанням
+    direct_question_indicators = [
+        'допоможи мені', 'підкажи мені', 'розкажи мені', 'поясни мені'
+    ]
+
+    if any(indicator in text_lower for indicator in direct_question_indicators):
+        is_question = True
+
+    # Якщо є "?" але без звернення "мені" або імені бота - не вважаємо питанням
+    if not is_question and '?' in text_lower:
+        if not is_jasmine and 'мені' not in text_lower:
+            is_question = False
+
     explanation = f"Simple: jasmine={is_jasmine}, question={is_question}"
     return is_jasmine, is_question, explanation
 
@@ -301,20 +330,36 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
         for msg in messages
     ])
 
-    prompt = f"""Ти — Жасмін, сімейний чат-бот. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата. Ти любиш жартувати, бути грайливою і трохи кокетливою, але завжди залишаєшся ввічливою і допоміжною.
+    system_prompt = """Ти — Жасмін, інтелектуальна сімейна чат-бот помічниця. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата.
 
-Останні повідомлення в чаті:
+Твій стиль:
+- Будь жартівливою, грайливою, трохи кокетливою, але завжди ввічливою
+- Давай корисні, продумані відповіді — аналізуй контекст глибоко
+- Якщо не знаєш відповіді — чесно скажи, не вигадуй
+- Використовуй емоції та емпатію в відповідях
+- Будь лаконічною, але інформативною
+- Адаптуй відповідь під контекст розмови
+
+Відповідай українською мовою."""
+
+    user_prompt = f"""Останні повідомлення в чаті:
 
 {context}
 
-Відповідай українською мовою. Будь собою — жартівливою, грайливою, з почуттям гумору."""
+Дай розумну, корисну відповідь з урахуванням контексту."""
 
     try:
         response = requests.post(
             lm_config["url"],
             json={
                 "model": lm_config["model"],
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.8,
+                "max_tokens": 1024,
+                "top_p": 0.9,
                 "stream": False
             },
             timeout=120
@@ -612,34 +657,9 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
             if verbose:
                 print(f"[Jasmine] ✓ [{msg['sender']}] {msg['text'][:50]}... ({explanation})")
         else:
-            # Якщо немає прямого звернення - перевіряємо коефіцієнти галузей
-            relevance_score, matched_industry = calculate_message_relevance(msg["text"], config)
-            
+            # Повідомлення не пройшло фільтрацію через ЛЛМ - пропускаємо
             if verbose:
-                industry_info = f"галузь: {matched_industry}" if matched_industry else "галузь: default"
-                print(f"[Jasmine] ○ [{msg['sender']}] {msg['text'][:50]}... (релевантність: {relevance_score:.2f}, {industry_info})")
-            
-            # Якщо релевантність >= коефіцієнту галузі - відправляємо
-            response_coeffs = config.get("jasmine_filter", {}).get("response_coefficients", {})
-            threshold = response_coeffs.get("default_coefficient", 0.4)
-            
-            if matched_industry:
-                # Знаходимо коефіцієнт для цієї галузі
-                for industry in response_coeffs.get("industries", []):
-                    if industry.get("name") == matched_industry:
-                        threshold = industry.get("coefficient", threshold)
-                        break
-            
-            if relevance_score >= threshold:
-                stats["filtered"] += 1
-                filtered_messages.append({
-                    "msg": msg,
-                    "msg_id": msg_id
-                })
-                
-                if verbose:
-                    print(f"[Jasmine] ✓ [{msg['sender']}] {msg['text'][:50]}... (пройшов за коефіцієнтом {threshold:.2f})")
-        # Не виводимо повідомлення що не проходять фільтр - зменшуємо шум в консолі
+                print(f"[Jasmine] ✗ [{msg['sender']}] {msg['text'][:50]}... (не пройшов фільтрацію)")
     
     # Відправляємо відфільтровані повідомлення до LM Studio
     if filtered_messages:
