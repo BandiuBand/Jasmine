@@ -16,6 +16,7 @@ kg/*.ark
 kg/*.npz
 
 # model files
+model.pth
 *.pth
 *.pt
 
