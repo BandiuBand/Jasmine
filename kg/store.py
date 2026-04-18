@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from collections import Counter
 from datetime import datetime
@@ -89,6 +90,10 @@ class KnowledgeGraph:
                 return nid
         return None
 
+    def _normalize_value(self, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value.lower()).strip()
+        return re.sub(r"[^\w\sа-яіїєґ'-]", "", normalized)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -116,14 +121,27 @@ class KnowledgeGraph:
             itype = item["type"]
             value = item["value"]
             confidence = float(item.get("confidence", 0.8))
+            value_norm = self._normalize_value(value)
+
+            existing_id = None
+            for nid, node in self.nodes.items():
+                if node.get("type") != itype:
+                    continue
+                if self._normalize_value(node.get("value", "")) == value_norm and value_norm:
+                    existing_id = nid
+                    break
 
             emb = get_embedding(value, self.embed_url, self.embed_model)
-            existing_id = self._find_duplicate(emb, itype) if emb else None
+            if not existing_id:
+                existing_id = self._find_duplicate(emb, itype) if emb else None
 
             if existing_id:
                 node = self.nodes[existing_id]
                 node["mentions"] = node.get("mentions", 0) + 1
                 node["updated_at"] = self._now()
+                node.setdefault("sources", [])
+                if source_ref not in node["sources"]:
+                    node["sources"].append(source_ref)
                 node_id = existing_id
             else:
                 node_id = self._short_id()
@@ -236,12 +254,14 @@ class KnowledgeGraph:
                 continue
             
             mentions = node.get("mentions", 1)
-            if mentions < min_mentions:
+            confidence = float(node.get("confidence", 0.8))
+            if mentions < min_mentions or (mentions == 1 and confidence < 0.45):
                 to_remove.append({
                     "id": nid,
                     "type": node["type"],
                     "value": node["value"],
-                    "mentions": mentions
+                    "mentions": mentions,
+                    "confidence": confidence,
                 })
         
         if dry_run:
@@ -303,6 +323,8 @@ class KnowledgeGraph:
                     similarity = cosine_similarity(emb1, emb2)
                     
                     if similarity >= similarity_threshold:
+                        if self._normalize_value(node1["value"]) == self._normalize_value(node2["value"]):
+                            similarity = 1.0
                         # Зберігаємо той, що має більше mentions
                         if node1.get("mentions", 1) >= node2.get("mentions", 1):
                             keep_id, remove_id = nid1, nid2
@@ -380,25 +402,33 @@ class KnowledgeGraph:
             if node["type"] in ("fact", "intent", "emotion", "behavior")
             and node.get("embedding")
         ]
+
+        existing_pairs = {
+            tuple(sorted((edge["from"], edge["to"])))
+            for edge in self.edges
+            if edge.get("relation") == "related_to"
+        }
         
         # Перевіряємо пари
         for i in range(len(embed_nodes)):
             for j in range(i + 1, len(embed_nodes)):
                 nid1, node1 = embed_nodes[i]
                 nid2, node2 = embed_nodes[j]
+
+                # Для зниження шуму пов'язуємо тільки різні типи сутностей
+                if node1["type"] == node2["type"]:
+                    continue
                 
                 # Пропускаємо якщо зв'язок вже існує
-                existing = any(
-                    (edge["from"] == nid1 and edge["to"] == nid2) or
-                    (edge["from"] == nid2 and edge["to"] == nid1)
-                    for edge in self.edges
-                )
-                if existing:
+                pair = tuple(sorted((nid1, nid2)))
+                if pair in existing_pairs:
                     continue
                 
                 similarity = cosine_similarity(node1["embedding"], node2["embedding"])
-                
-                if similarity >= min_similarity:
+
+                min_mentions = min(node1.get("mentions", 1), node2.get("mentions", 1))
+                dynamic_threshold = min_similarity + (0.05 if min_mentions <= 1 else 0.0)
+                if similarity >= dynamic_threshold:
                     potential_connections.append({
                         "from_id": nid1,
                         "from_type": node1["type"],
@@ -426,6 +456,7 @@ class KnowledgeGraph:
                 "similarity": conn["similarity"]
             }
             self.edges.append(edge)
+            existing_pairs.add(tuple(sorted((conn["from_id"], conn["to_id"]))))
         
         return {
             "dry_run": False,

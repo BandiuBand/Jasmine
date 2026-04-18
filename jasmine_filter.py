@@ -16,18 +16,27 @@ import re
 import sys
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
 _LOGS_DIR = os.path.join(_BASE_DIR, "logs")
 _PROCESSED_FILE = os.path.join(_BASE_DIR, "jasmine_processed.json")
+_CONTEXT_STATE_FILE = os.path.join(_BASE_DIR, "jasmine_context_state.json")
 
 # Matches: [HH:MM:SS] [type] optional:[sender]  text
 _LINE_RE = re.compile(
     r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(\w+)\](?:\s+\[([^\]]+)\])?\s+(.+)$"
 )
+
+_STOPWORDS = {
+    "і", "й", "та", "або", "що", "це", "як", "для", "але", "бо", "чи", "не",
+    "на", "в", "у", "з", "до", "по", "про", "за", "над", "під", "від", "при",
+    "the", "a", "an", "to", "in", "of", "is", "are"
+}
+
+_GREETING_RE = re.compile(r"^(привіт|добр(ий|ого)|hello|hi|йо|салют)\b", re.IGNORECASE)
 
 
 def load_processed_messages() -> set:
@@ -48,6 +57,28 @@ def save_processed_messages(processed: set):
             json.dump(list(processed), f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[Jasmine] Error saving processed messages: {e}")
+
+
+def load_context_state() -> Dict:
+    """Завантажує стан контексту розмов по чатах."""
+    if os.path.exists(_CONTEXT_STATE_FILE):
+        try:
+            with open(_CONTEXT_STATE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"[Jasmine] Error loading context state: {e}")
+    return {"chats": {}}
+
+
+def save_context_state(state: Dict):
+    """Зберігає стан контексту розмов по чатах."""
+    try:
+        with open(_CONTEXT_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Jasmine] Error saving context state: {e}")
 
 
 def get_message_id(msg: Dict) -> str:
@@ -155,6 +186,7 @@ def get_last_messages(n: int) -> List[Dict]:
                                     "text": text,
                                     "chat_id": chat_identifier,
                                     "date_str": date_str,
+                                    "dt": f"{date_str} {ts}",
                                     "file_path": file_path,
                                     "line_idx": i
                                 })
@@ -325,8 +357,13 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
     lm_config = config["jasmine_filter"]["lm_studio"]
 
     # Формуємо контекст з повідомлень
+    roles = infer_chat_roles(messages, config)
+    role_lines = []
+    for sender, meta in sorted(roles.items(), key=lambda x: -x[1].get("messages", 0)):
+        role_lines.append(f"- {sender}: роль={meta['role']}, повідомлень={meta['messages']}")
+
     context = "\n".join([
-        f"[{msg['timestamp']}] [{msg['sender']}]: {msg['text']}"
+        f"[{msg['date_str']} {msg['timestamp']}] [{msg['sender']}]: {msg['text']}"
         for msg in messages
     ])
 
@@ -344,9 +381,13 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
 
     user_prompt = f"""Останні повідомлення в чаті:
 
+Учасники та їх імовірні ролі:
+{chr(10).join(role_lines) if role_lines else "- невідомо"}
+
 {context}
 
-Дай розумну, корисну відповідь з урахуванням контексту."""
+Дай розумну, корисну відповідь з урахуванням контексту.
+Якщо в контексті не видно прямого звернення до Жасмін або запиту на допомогу — відповідай дуже коротко і нейтрально."""
 
     try:
         response = requests.post(
@@ -521,6 +562,149 @@ def get_previous_message(messages: List[Dict], current_index: int) -> Optional[s
     return None
 
 
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _extract_keywords(text: str, max_keywords: int = 6) -> List[str]:
+    tokens = re.findall(r"[a-zа-яіїєґ0-9_'-]{3,}", _normalize_text(text))
+    keywords = [t for t in tokens if t not in _STOPWORDS]
+    seen = set()
+    result = []
+    for kw in keywords:
+        if kw in seen:
+            continue
+        seen.add(kw)
+        result.append(kw)
+        if len(result) >= max_keywords:
+            break
+    return result
+
+
+def infer_chat_roles(messages: List[Dict], config: dict) -> Dict[str, Dict]:
+    """Грубо визначає ролі учасників у чаті для кращого розуміння 'хто є хто'."""
+    bot_name = _normalize_text(config["jasmine_filter"].get("bot_name", "Жасмін"))
+    bot_vars = [_normalize_text(v) for v in config["jasmine_filter"].get("bot_name_variations", [])]
+    bot_aliases = {bot_name, *bot_vars, "bot", "assistant", "жасмін"}
+
+    counts: Dict[str, int] = {}
+    for msg in messages:
+        sender = msg.get("sender", "").strip()
+        if not sender:
+            continue
+        counts[sender] = counts.get(sender, 0) + 1
+
+    roles = {}
+    for sender, count in counts.items():
+        sender_norm = _normalize_text(sender)
+        role = "assistant" if any(alias in sender_norm for alias in bot_aliases) else "human"
+        roles[sender] = {"role": role, "messages": count}
+    return roles
+
+
+def _parse_dt(msg: Dict) -> Optional[datetime]:
+    try:
+        return datetime.strptime(f"{msg['date_str']} {msg['timestamp']}", "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _topic_overlap(a: List[str], b: List[str]) -> float:
+    if not a or not b:
+        return 0.0
+    sa, sb = set(a), set(b)
+    return len(sa & sb) / max(len(sa | sb), 1)
+
+
+def decide_response(msg: Dict, config: dict, context_state: Dict, recent_chat_messages: List[Dict],
+                    is_jasmine: bool, is_question: bool) -> Tuple[bool, float, List[str]]:
+    """
+    Приймає рішення чи варто відповідати.
+    Повертає: (should_respond, score, reasons)
+    """
+    score = 0.0
+    reasons: List[str] = []
+    text = msg.get("text", "")
+    text_norm = _normalize_text(text)
+    chat_id = msg.get("chat_id", "unknown")
+    topic_keywords = _extract_keywords(text)
+    relevance, industry = calculate_message_relevance(text, config)
+
+    if is_jasmine:
+        score += 0.8
+        reasons.append("пряме звернення до Жасмін")
+    if is_question:
+        score += 0.45
+        reasons.append("є запит/питання")
+    if "?" in text and len(text) > 8:
+        score += 0.15
+        reasons.append("питальна форма")
+    if _GREETING_RE.search(text_norm) and len(text_norm) < 22:
+        score -= 0.25
+        reasons.append("коротке вітання без задачі")
+
+    score += min(relevance, 1.0) * 0.25
+    if industry:
+        reasons.append(f"релевантна галузь: {industry}")
+
+    # Контекст попередніх взаємодій у чаті
+    chat_state = context_state.get("chats", {}).get(chat_id, {})
+    active = chat_state.get("active_topic", {})
+    active_keywords = active.get("keywords", [])
+    overlap = _topic_overlap(topic_keywords, active_keywords)
+    if overlap >= 0.25:
+        score += 0.2
+        reasons.append(f"продовження активної теми ({overlap:.2f})")
+
+    active_until = chat_state.get("active_until")
+    now_dt = _parse_dt(msg) or datetime.now()
+    if active_until:
+        try:
+            until_dt = datetime.fromisoformat(active_until)
+            if now_dt <= until_dt:
+                score += 0.1
+                reasons.append("в межах активного контекстного вікна")
+        except Exception:
+            pass
+
+    # Якщо є ознаки діалогу "людина -> питання -> уточнення"
+    if len(recent_chat_messages) >= 2:
+        prev = recent_chat_messages[-2]
+        prev_keywords = _extract_keywords(prev.get("text", ""))
+        if _topic_overlap(topic_keywords, prev_keywords) >= 0.25:
+            score += 0.1
+            reasons.append("локальна зв'язність з попереднім повідомленням")
+
+    should_respond = score >= 0.65
+    return should_respond, round(score, 3), reasons
+
+
+def build_context_window(messages: List[Dict], target_idx: int, max_messages: int = 12) -> List[Dict]:
+    """Будує контекстне вікно в межах однієї теми та одного чату."""
+    if target_idx < 0 or target_idx >= len(messages):
+        return []
+    target = messages[target_idx]
+    chat_id = target.get("chat_id")
+    target_keys = _extract_keywords(target.get("text", ""))
+
+    window = [target]
+    i = target_idx - 1
+    while i >= 0 and len(window) < max_messages:
+        msg = messages[i]
+        if msg.get("chat_id") != chat_id:
+            i -= 1
+            continue
+        keys = _extract_keywords(msg.get("text", ""))
+        overlap = _topic_overlap(target_keys, keys)
+        if overlap >= 0.2 or i >= target_idx - 3:
+            window.append(msg)
+        else:
+            break
+        i -= 1
+
+    return list(reversed(window))
+
+
 def send_audio_to_chat(chat_id: str, audio: bytes, config: dict) -> bool:
     """
     Відправляє аудіо в чат через бота.
@@ -595,6 +779,7 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
     
     # Завантажуємо список оброблених повідомлень
     processed_ids = load_processed_messages()
+    context_state = load_context_state()
     
     stats = {
         "total": len(messages),
@@ -612,7 +797,7 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
     if verbose:
         print(f"[Jasmine] Перевіряю {len(messages)} останніх повідомлень...")
 
-    filtered_messages = []
+    filtered_by_chat: Dict[str, Dict] = {}
     tts_requests = []  # Зберігаємо запити на озвучку
 
     # Отримуємо налаштування ЛЛМ для TTS
@@ -646,36 +831,61 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
                 print(f"[Jasmine] 🔊 TTS запит: [{msg['sender']}] {msg['text'][:50]}...")
             continue  # Не відправляємо в LM Studio якщо це TTS запит
 
-        # Якщо є пряме звернення або питання - відправляємо
-        if is_jasmine or is_question:
+        # Нова логіка рішення чи відповідати
+        recent_in_chat = [m for m in messages[max(0, idx - 8): idx + 1] if m["chat_id"] == msg["chat_id"]]
+        should_respond, score, reasons = decide_response(
+            msg, config, context_state, recent_in_chat, is_jasmine, is_question
+        )
+
+        if should_respond:
             stats["filtered"] += 1
-            filtered_messages.append({
+            context_window = build_context_window(messages, idx)
+            filtered_by_chat[msg["chat_id"]] = {
                 "msg": msg,
-                "msg_id": msg_id
-            })
+                "msg_id": msg_id,
+                "context": context_window
+            }
 
             if verbose:
-                print(f"[Jasmine] ✓ [{msg['sender']}] {msg['text'][:50]}... ({explanation})")
+                print(
+                    f"[Jasmine] ✓ [{msg['sender']}] {msg['text'][:50]}... "
+                    f"(score={score}, {explanation}; {'; '.join(reasons[:3])})"
+                )
         else:
-            # Повідомлення не пройшло фільтрацію через ЛЛМ - пропускаємо
             if verbose:
-                print(f"[Jasmine] ✗ [{msg['sender']}] {msg['text'][:50]}... (не пройшов фільтрацію)")
+                print(f"[Jasmine] ✗ [{msg['sender']}] {msg['text'][:50]}... (score={score})")
     
     # Відправляємо відфільтровані повідомлення до LM Studio
+    filtered_messages = list(filtered_by_chat.values())
     if filtered_messages:
         if verbose:
-            print(f"[Jasmine] Відправляю {len(filtered_messages)} повідомлень до Жасмін (LM Studio)...")
+            print(f"[Jasmine] Відправляю {len(filtered_messages)} контекстних запитів до Жасмін (LM Studio)...")
 
-        response = send_to_lm_studio([item["msg"] for item in filtered_messages], config)
+        for item in filtered_messages:
+            chat_id = item["msg"]["chat_id"]
+            context_messages = item.get("context") or [item["msg"]]
+            response = send_to_lm_studio(context_messages, config)
 
-        if response:
-            stats["sent_to_lm"] = len(filtered_messages)
+            if not response:
+                if verbose:
+                    print(f"[Jasmine] Не вдалося отримати відповідь для чату {chat_id}")
+                continue
+
+            stats["sent_to_lm"] += 1
+            processed_ids.add(item["msg_id"])
             if verbose:
-                print(f"[Jasmine] Жасмін відповіла: {response[:100]}...")
+                print(f"[Jasmine] Жасмін відповіла ({chat_id}): {response[:100]}...")
 
-            # Позначаємо повідомлення як оброблені
-            for item in filtered_messages:
-                processed_ids.add(item["msg_id"])
+            # Оновлюємо контекстний стан чату
+            chat_state = context_state.setdefault("chats", {}).setdefault(chat_id, {})
+            keywords = _extract_keywords(item["msg"]["text"])
+            now_dt = _parse_dt(item["msg"]) or datetime.now()
+            chat_state["active_topic"] = {
+                "keywords": keywords,
+                "updated_at": now_dt.isoformat(timespec="seconds"),
+                "last_sender": item["msg"]["sender"]
+            }
+            chat_state["active_until"] = (now_dt + timedelta(minutes=15)).isoformat(timespec="seconds")
 
             # Озвучуємо відповідь якщо TTS увімкнено, інакше відправляємо текст
             tts_enabled = config.get("jasmine_filter", {}).get("tts_enabled", False)
@@ -684,37 +894,30 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
                 audio = text_to_speech(response, config, voice)
                 if audio and verbose:
                     print(f"[Jasmine] Аудіо згенеровано ({len(audio)} байт)")
-                    # Відправляємо аудіо в чат
-                    # Отримуємо chat_id з першого повідомлення
-                    if filtered_messages:
-                        chat_id = filtered_messages[0]["msg"]["chat_id"]
-                        send_audio_to_chat(chat_id, audio, config)
+                    send_audio_to_chat(chat_id, audio, config)
                 elif verbose:
                     print(f"[Jasmine] Не вдалося згенерувати аудіо")
             else:
-                # Відправляємо текстову відповідь в чат
-                if filtered_messages and verbose:
+                if verbose:
                     print(f"[Jasmine] Відправляю текстову відповідь...")
-                    # Відправляємо текст через бота
-                    chat_id = filtered_messages[0]["msg"]["chat_id"]
-                    numeric_chat_id = get_numeric_chat_id(chat_id)
-                    if numeric_chat_id:
-                        import subprocess
-                        import sys
-                        bot_path = os.path.join(_BASE_DIR, "bot.py")
-                        result = subprocess.run(
-                            [sys.executable, bot_path, "--send", str(numeric_chat_id), response],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                            cwd=_BASE_DIR
-                        )
-                        if result.returncode == 0:
-                            print(f"[Jasmine] Текст відправлено в чат {chat_id}")
-                        else:
-                            print(f"[Jasmine] Помилка відправки тексту: {result.stderr}")
-        elif verbose:
-            print(f"[Jasmine] Не вдалося отримати відповідь від Жасмін")
+                numeric_chat_id = get_numeric_chat_id(chat_id)
+                if numeric_chat_id:
+                    import subprocess
+                    import sys
+                    bot_path = os.path.join(_BASE_DIR, "bot.py")
+                    result = subprocess.run(
+                        [sys.executable, bot_path, "--send", str(numeric_chat_id), response],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        cwd=_BASE_DIR
+                    )
+                    if result.returncode == 0 and verbose:
+                        print(f"[Jasmine] Текст відправлено в чат {chat_id}")
+                    elif verbose:
+                        print(f"[Jasmine] Помилка відправки тексту: {result.stderr}")
+    elif verbose:
+        print(f"[Jasmine] Немає повідомлень, які потребують відповіді")
 
     # Обробляємо TTS запити
     if tts_requests:
@@ -758,6 +961,7 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
 
     # Зберігаємо список оброблених повідомлень (навіть якщо нічого не відправлено)
     save_processed_messages(processed_ids)
+    save_context_state(context_state)
 
     return stats
 
