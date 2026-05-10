@@ -6,6 +6,7 @@ from datetime import datetime
 import requests
 from telegram import Update, Chat
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
+from telegram.request import HTTPXRequest
 
 # 1) Налаштування
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -142,20 +143,58 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Помилка при озвучці: {e}")
 
+def _build_app_with_timeouts(read: float = 30.0, write: float = 30.0, connect: float = 15.0, pool: float = 5.0):
+    """ApplicationBuilder з кастомними HTTPXRequest таймаутами для CLI режимів."""
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=read,
+        write_timeout=write,
+        connect_timeout=connect,
+        pool_timeout=pool,
+    )
+    return (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(request)
+        .build()
+    )
+
+
+async def _send_with_retry(coro_factory, attempts: int = 3, base_delay: float = 2.0):
+    """Викликає coro_factory() з ретраями при помилках мережі."""
+    import asyncio
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                delay = base_delay * (2 ** i)
+                print(f"Спроба {i+1}/{attempts} провалилась ({type(exc).__name__}: {exc}). Повтор через {delay}с...")
+                await asyncio.sleep(delay)
+    raise last_exc
+
+
 async def send_message(chat_id: int, text: str):
     """Відправляє повідомлення від бота в зазначений чат"""
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = _build_app_with_timeouts()
     async with app:
-        await app.bot.send_message(chat_id=chat_id, text=text)
+        await _send_with_retry(
+            lambda: app.bot.send_message(chat_id=chat_id, text=text)
+        )
         print(f"Повідомлення відправлено в чат {chat_id}")
 
 
 async def send_voice_message(chat_id: int, audio_path: str):
     """Відправляє голосове повідомлення від бота в зазначений чат"""
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = _build_app_with_timeouts(read=60.0, write=60.0)
     async with app:
-        with open(audio_path, "rb") as audio_file:
-            await app.bot.send_voice(chat_id=chat_id, voice=audio_file)
+        async def _send():
+            with open(audio_path, "rb") as audio_file:
+                return await app.bot.send_voice(chat_id=chat_id, voice=audio_file)
+        await _send_with_retry(_send)
         print(f"Голосове повідомлення відправлено в чат {chat_id}")
 
 def main():

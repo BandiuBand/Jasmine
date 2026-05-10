@@ -567,6 +567,15 @@ def _lm_studio_chat(
     user_prompt: str,
     timeout: int = 450,
 ) -> str:
+    # Stop sequences щоб модель не продовжувала фейковий діалог
+    stop_sequences = [
+        "\n[20",       # початок штампу часу [2026-...
+        "\n[BandiuB",
+        "\n[ЮРІЙ",
+        "\n[Band",
+        "\n[Жасмін]:",
+        "\n[Jasmine]:",
+    ]
     response = requests.post(
         lm_config["url"],
         json={
@@ -578,7 +587,8 @@ def _lm_studio_chat(
             "temperature": 0.8,
             "max_tokens": 20000,
             "top_p": 0.9,
-            "stream": False
+            "stream": False,
+            "stop": stop_sequences,
         },
         timeout=timeout
     )
@@ -707,7 +717,21 @@ def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknow
         rag_context = get_rag_context(last_message["text"], chat_id, config, max_results=5)
         web_context = get_web_search_context(last_message["text"], config, max_results=5)
 
-    system_prompt = """Ти — Жасмін, інтелектуальна сімейна чат-бот помічниця. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата.
+    web_search_enabled = bool(
+        config.get("jasmine_filter", {}).get("web_search", {}).get("enabled", False)
+    )
+    web_search_note = (
+        "\n\nДоступні інструменти:\n"
+        "- 🌐 Пошук в інтернеті (DuckDuckGo + Wikipedia) активується АВТОМАТИЧНО, "
+        "коли користувач використовує тригерні слова: 'пошукай', 'знайди', 'загугли', "
+        "'хто такий', 'що таке', 'новини', 'актуальн', 'сьогодні'. "
+        "Якщо результати пошуку додано в контекст — використай їх та обов'язково додай URL-джерело. "
+        "Якщо користувач хоче інформацію з інтернету, але не використав тригерні слова — "
+        "запропонуй: \"Хочеш я пошукаю в інтернеті? Скажи 'пошукай ...'\""
+        if web_search_enabled else ""
+    )
+
+    system_prompt = f"""Ти — Жасмін, інтелектуальна сімейна чат-бот помічниця. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата.
 
 Твій стиль:
 - Будь жартівливою, грайливою, трохи кокетливою, але завжди ввічливою
@@ -718,7 +742,14 @@ def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknow
 - Адаптуй відповідь під контекст розмови
 - Використовуй знання з бази знань (якщо є) для кращих відповідей
 
-Відповідай українською мовою.
+Відповідай українською мовою.{web_search_note}
+
+⚠️ КРИТИЧНІ ПРАВИЛА ФОРМАТУ ВІДПОВІДІ:
+1. Видавай ТІЛЬКИ ОДНЕ повідомлення від свого імені (Жасмін).
+2. НЕ імітуй і НЕ пиши повідомлення від імені інших учасників чату (BandiuB, ЮРІЙ, alex_konsta тощо).
+3. НЕ додавай маркери часу типу [2026-05-10 13:31:55] чи [Жасмін]: — їх додасть система.
+4. НЕ продовжуй діалог за інших — зупинись після своєї єдиної відповіді.
+5. Не вигадуй вигаданих діалогів.
 
 Ти можеш відправляти повідомлення в інші чати. Доступні чати: сімейний (family).
 Якщо користувач просить "напиши в сімейний чат" або подібне — почни відповідь з тегу [SEND_TO:ім'я_чату] на окремому рядку, потім текст повідомлення.
@@ -1454,18 +1485,48 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
                     import subprocess
                     import sys
                     bot_path = os.path.join(_BASE_DIR, "bot.py")
-                    result = subprocess.run(
-                        [sys.executable, bot_path, "--send", str(numeric_chat_id), response_cleaned],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        cwd=_BASE_DIR
-                    )
-                    if result.returncode == 0 and verbose:
+
+                    # Telegram має ліміт 4096 символів на повідомлення
+                    TELEGRAM_MAX = 4000  # запас 96 символів
+                    chunks = []
+                    text_to_send = response_cleaned
+                    while len(text_to_send) > TELEGRAM_MAX:
+                        # шукаємо найближчий перенос рядка для розриву
+                        cut = text_to_send.rfind("\n", 0, TELEGRAM_MAX)
+                        if cut < TELEGRAM_MAX // 2:
+                            cut = TELEGRAM_MAX
+                        chunks.append(text_to_send[:cut])
+                        text_to_send = text_to_send[cut:].lstrip()
+                    if text_to_send:
+                        chunks.append(text_to_send)
+
+                    all_ok = True
+                    last_err = ""
+                    for idx, chunk in enumerate(chunks, 1):
+                        result = subprocess.run(
+                            [sys.executable, bot_path, "--send", str(numeric_chat_id), chunk],
+                            capture_output=True,
+                            text=True,
+                            timeout=90,
+                            cwd=_BASE_DIR
+                        )
+                        if result.returncode != 0:
+                            all_ok = False
+                            last_err = (
+                                f"rc={result.returncode}, "
+                                f"stderr={result.stderr.strip()!r}, "
+                                f"stdout={result.stdout.strip()[:300]!r}"
+                            )
+                            break
+                    if all_ok and verbose:
                         target_desc = target_chat_id if target_chat_id else chat_id
-                        print(f"[Jasmine] Текст відправлено в чат {target_desc}")
+                        chunk_info = f" ({len(chunks)} частин)" if len(chunks) > 1 else ""
+                        print(f"[Jasmine] Текст відправлено в чат {target_desc}{chunk_info}")
                     elif verbose:
-                        print(f"[Jasmine] Помилка відправки тексту: {result.stderr}")
+                        print(
+                            f"[Jasmine] Помилка відправки тексту: {last_err} "
+                            f"| len(response)={len(response_cleaned)}"
+                        )
     elif verbose:
         print(f"[Jasmine] Немає повідомлень, які потребують відповіді")
 
