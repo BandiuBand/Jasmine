@@ -27,6 +27,12 @@ def _queue_path(config: Dict) -> str:
     return path if os.path.isabs(path) else os.path.join(_BASE_DIR, path)
 
 
+def _dead_letter_path(config: Dict) -> str:
+    graphiti_config = config.get("jasmine_filter", {}).get("graphiti_memory", {})
+    path = graphiti_config.get("dead_letter_path", "logs/graphiti_ingest_dead_letter.jsonl")
+    return path if os.path.isabs(path) else os.path.join(_BASE_DIR, path)
+
+
 def _load_queue(path: str) -> List[Dict]:
     if not os.path.exists(path):
         return []
@@ -73,14 +79,23 @@ def _write_queue(path: str, items: List[Dict]) -> None:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
+def _append_dead_letter(path: str, item: Dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
 def process_once(config: Dict, limit: int = 20) -> Dict[str, int]:
     graphiti_config = config.get("jasmine_filter", {}).get("graphiti_memory", {})
     graphiti = GraphitiMemoryClient(graphiti_config)
     queue_path = _queue_path(config)
+    dead_letter_path = _dead_letter_path(config)
+    max_failures = int(graphiti_config.get("max_ingest_failures", 3))
     items = _load_queue(queue_path)
 
     processed = 0
     failed = 0
+    dead_lettered = 0
     remaining = items[limit:]
 
     for item in items[:limit]:
@@ -95,10 +110,25 @@ def process_once(config: Dict, limit: int = 20) -> Dict[str, int]:
             processed += 1
         else:
             failed += 1
-            remaining.append(item)
+            item["graphiti_failures"] = int(item.get("graphiti_failures", 0)) + 1
+            if item["graphiti_failures"] >= max_failures:
+                dead_lettered += 1
+                _append_dead_letter(dead_letter_path, item)
+                print(
+                    "[GraphitiWorker] Dead-lettered item after "
+                    f"{item['graphiti_failures']} failures: {item.get('name', '<unnamed>')}"
+                )
+            else:
+                remaining.append(item)
 
     _write_queue(queue_path, remaining)
-    return {"queued": len(items), "processed": processed, "failed": failed, "remaining": len(remaining)}
+    return {
+        "queued": len(items),
+        "processed": processed,
+        "failed": failed,
+        "dead_lettered": dead_lettered,
+        "remaining": len(remaining),
+    }
 
 
 def main() -> None:
@@ -114,7 +144,8 @@ def main() -> None:
         stats = process_once(config, limit=args.limit)
         print(
             "[GraphitiWorker] queued={queued}, processed={processed}, "
-            "failed={failed}, remaining={remaining}".format(**stats)
+            "failed={failed}, dead_lettered={dead_lettered}, "
+            "remaining={remaining}".format(**stats)
         )
         if args.once or not args.watch:
             return

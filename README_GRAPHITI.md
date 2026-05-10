@@ -4,23 +4,24 @@ WasterWhisper now uses the local Graphiti memory service through HTTP, not by im
 
 ## Why HTTP service
 
-LM Studio can hold only one useful model at a time on this machine. The bot should keep LM Studio available for the main Jasmine response model. Graphiti service should run in service mode on Ollama plus a local embedder fallback.
+LM Studio can hold only one useful model at a time on this machine. The bot should keep LM Studio available for the main Gemma/Jasmine model. Graphiti runs as an HTTP service: LLM calls go to the currently loaded LM Studio model, while embeddings go to Ollama so embedding requests do not unload Gemma.
 
 Recommended Graphiti service config:
 
 ```dotenv
-GRAPHITI_LLM_PROVIDER=ollama
-GRAPHITI_LLM_BASE_URL=http://127.0.0.1:11434/v1
-GRAPHITI_LLM_API_KEY=ollama
-GRAPHITI_LLM_MODEL=qwen3.5-local:4b
-GRAPHITI_SMALL_MODEL=qwen3.5-local:4b
-GRAPHITI_EMBEDDER_BASE_URL=local://hash
-GRAPHITI_EMBEDDER_API_KEY=local
-GRAPHITI_EMBEDDER_MODEL=local-hash-embedder
+GRAPHITI_LLM_PROVIDER=lmstudio
+GRAPHITI_LLM_BASE_URL=http://127.0.0.1:1234/v1
+GRAPHITI_LLM_API_KEY=lm-studio
+GRAPHITI_LLM_MODEL=google/gemma-4-26b-a4b
+GRAPHITI_SMALL_MODEL=google/gemma-4-26b-a4b
+GRAPHITI_LMSTUDIO_LOADED_MODEL_FALLBACK=true
+GRAPHITI_EMBEDDER_BASE_URL=http://127.0.0.1:11434/v1
+GRAPHITI_EMBEDDER_API_KEY=ollama
+GRAPHITI_EMBEDDER_MODEL=nomic-embed-text
 GRAPHITI_EMBEDDING_DIM=768
 ```
 
-This avoids loading a second LM Studio model for Graphiti.
+This avoids loading a second large model in LM Studio and keeps embeddings in a separate Ollama runtime.
 
 ## Start order
 
