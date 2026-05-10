@@ -24,6 +24,16 @@ WHISPER_TRANSCRIBE_URL = os.getenv("WHISPER_TRANSCRIBE_URL", "http://localhost:8
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _REGISTRY_FILE = os.path.join(_BASE_DIR, "logs", "chat_registry.json")
+_CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
+
+
+def _load_config() -> dict:
+    """Завантажує config.json, повертає порожній dict при помилці."""
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def _update_registry(identifier: str, chat_id: int):
     """Зберігає маппінг identifier → chat_id для відправки повідомлень"""
@@ -104,22 +114,25 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     save_message(chat.id, chat_title, text, "text", sender, chat.type)
 
     # Jasmine v2 shadow mode - не впливає на стару логіку
-    try:
-        message = update.effective_message
-        if message and message.text:
-            run_telegram_shadow_event(
-                chat_id=chat.id if chat else "unknown",
-                user_id=user.id if user else "unknown",
-                user_name=user.full_name if user else None,
-                text=message.text,
-                raw={
-                    "message_id": message.message_id,
-                    "chat_type": chat.type if chat else None,
-                    "username": user.username if user else None,
-                },
-            )
-    except Exception as exc:
-        print(f"[Jasmine v2 shadow] error: {exc}")
+    config = _load_config()
+    v2_cfg = config.get("jasmine_v2", {})
+    if v2_cfg.get("enabled", False):
+        try:
+            message = update.effective_message
+            if message and message.text:
+                run_telegram_shadow_event(
+                    chat_id=chat.id if chat else "unknown",
+                    user_id=user.id if user else "unknown",
+                    user_name=user.full_name if user else None,
+                    text=message.text,
+                    raw={
+                        "message_id": message.message_id,
+                        "chat_type": chat.type if chat else None,
+                        "username": user.username if user else None,
+                    },
+                )
+        except Exception as exc:
+            print(f"[Jasmine v2 shadow] error: {exc}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показує chat_id при команді /start"""
