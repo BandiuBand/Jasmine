@@ -18,6 +18,13 @@
     "tts_voice": "Tetiana",
     "use_llm_tts": false,
     "response_decision_timeout_seconds": 90,
+    "web_search": {
+      "enabled": true,
+      "mode": "auto",
+      "source": "auto",
+      "max_results": 5,
+      "max_context_chars": 2000
+    },
     "graphiti_memory": {
       "enabled": true,
       "url": "http://127.0.0.1:8088",

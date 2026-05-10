@@ -5,3 +5,4 @@ requests==2.31.0
 faster-whisper==0.9.10
 torch==2.1.0
 git+https://github.com/robinhad/ukrainian-tts.git
+ddgs>=9.0.0

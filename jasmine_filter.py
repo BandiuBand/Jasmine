@@ -30,6 +30,7 @@ from kg.graphiti_client import (
     graphiti_group_id,
     message_reference_time,
 )
+from web_search import web_search, should_search, format_search_context
 _CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
 _LOGS_DIR = os.path.join(_BASE_DIR, "logs")
 _PROCESSED_FILE = os.path.join(_BASE_DIR, "jasmine_processed.json")
@@ -213,6 +214,41 @@ def get_rag_context(text: str, chat_id: str, config: dict, max_results: int = 5)
         
     except Exception as e:
         print(f"[Jasmine] Помилка RAG: {e}")
+        return ""
+
+
+def get_web_search_context(text: str, config: dict, max_results: int = 5) -> str:
+    """
+    Виконує веб-пошук (DuckDuckGo + Wikipedia) якщо в тексті є тригери
+    або якщо явно увімкнено в конфізі. Повертає форматований контекст для LLM.
+    """
+    ws_config = config.get("jasmine_filter", {}).get("web_search", {})
+    if not ws_config.get("enabled", False):
+        return ""
+
+    mode = ws_config.get("mode", "auto")  # auto | always | off
+    if mode == "off":
+        return ""
+
+    source = ws_config.get("source", "auto")  # auto | web | wiki | both
+    limit = int(ws_config.get("max_results", max_results))
+    max_chars = int(ws_config.get("max_context_chars", 2000))
+
+    if mode == "auto":
+        decision = should_search(text)
+        if not decision:
+            return ""
+        if source == "auto":
+            source = decision
+
+    try:
+        results = web_search(text, source=source, max_results=limit)
+        ctx = format_search_context(results, max_chars=max_chars)
+        if ctx:
+            print(f"[Jasmine] 🌐 Веб-пошук: знайдено {len(results)} результатів (source={source})")
+        return ctx
+    except Exception as exc:
+        print(f"[Jasmine] Web search error: {exc}")
         return ""
 
 
@@ -666,8 +702,10 @@ def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknow
     # Отримуємо RAG контекст з БЗ для останнього повідомлення
     last_message = messages[-1] if messages else None
     rag_context = ""
+    web_context = ""
     if last_message:
         rag_context = get_rag_context(last_message["text"], chat_id, config, max_results=5)
+        web_context = get_web_search_context(last_message["text"], config, max_results=5)
 
     system_prompt = """Ти — Жасмін, інтелектуальна сімейна чат-бот помічниця. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата.
 
@@ -698,13 +736,15 @@ def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknow
 Дай розумну, корисну відповідь з урахуванням контексту.
 Якщо в контексті не видно прямого звернення до Жасмін або запиту на допомогу — відповідай дуже коротко і нейтрально."""
 
-    # Додаємо RAG контекст якщо є
+    # Додаємо RAG та веб-контекст якщо є
+    extra_blocks = []
     if rag_context:
-        user_prompt = f"""{base_user_prompt}
+        extra_blocks.append(rag_context + "\n\nВрахуй цей контекст з бази знань при формуванні відповіді.")
+    if web_context:
+        extra_blocks.append(web_context + "\n\nВикористай ці актуальні дані з інтернету у відповіді. Обов'язково додай джерело (URL) якщо посилаєшся на конкретний факт.")
 
-{rag_context}
-
-Врахуй цей контекст з бази знань при формуванні відповіді."""
+    if extra_blocks:
+        user_prompt = base_user_prompt + "\n\n" + "\n\n".join(extra_blocks)
     else:
         user_prompt = base_user_prompt
 
