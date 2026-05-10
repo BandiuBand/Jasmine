@@ -104,6 +104,10 @@
       "default_coefficient": 0.05
     }
   },
+  "jasmine_v2": {
+    "enabled": true,
+    "shadow_mode": true
+  },
   "kg_watch": {
     "enabled": true
   }
