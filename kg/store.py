@@ -463,3 +463,67 @@ class KnowledgeGraph:
             "connected": len(potential_connections),
             "items": potential_connections
         }
+
+    def search_rag(self, query_embedding: List[float], chat_id: Optional[str] = None,
+                   min_similarity: float = 0.70, max_results: int = 10,
+                   node_types: Optional[List[str]] = None) -> List[Dict]:
+        """
+        RAG пошук релевантного контексту з Knowledge Graph.
+        
+        Args:
+            query_embedding: ембедінг запиту
+            chat_id: фільтр за конкретним чатом (опціонально)
+            min_similarity: мінімальна схожість для включення результату
+            max_results: максимальна кількість результатів
+            node_types: типи вузлів для пошуку (fact, intent, emotion, behavior)
+            
+        Returns:
+            Список релевантних вузлів з інформацією про схожість
+        """
+        if node_types is None:
+            node_types = ["fact", "intent", "emotion", "behavior"]
+        
+        results = []
+        
+        for nid, node in self.nodes.items():
+            # Фільтруємо за типом
+            if node["type"] not in node_types:
+                continue
+            
+            # Фільтруємо за чатом (якщо вказано)
+            if chat_id is not None:
+                # Перевіряємо чи вузол пов'язаний з особою з цього чату
+                person_match = False
+                for edge in self.edges:
+                    if edge["to"] == nid:
+                        from_node = self.nodes.get(edge["from"])
+                        if from_node and from_node.get("type") == "person":
+                            if from_node.get("chat_id") == chat_id:
+                                person_match = True
+                                break
+                if not person_match:
+                    continue
+            
+            # Перевіряємо наявність ембедінгу
+            node_embedding = node.get("embedding")
+            if not node_embedding:
+                continue
+            
+            # Рахуємо схожість
+            similarity = cosine_similarity(query_embedding, node_embedding)
+            
+            if similarity >= min_similarity:
+                results.append({
+                    "id": nid,
+                    "type": node["type"],
+                    "value": node["value"],
+                    "similarity": similarity,
+                    "mentions": node.get("mentions", 1),
+                    "confidence": node.get("confidence", 0.8),
+                    "sources": node.get("sources", [])
+                })
+        
+        # Сортуємо за схожістю та кількістю згадок
+        results.sort(key=lambda x: (-x["similarity"], -x["mentions"]))
+        
+        return results[:max_results]

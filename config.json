@@ -5,12 +5,42 @@
     "last_n_messages": 50,
     "ollama": {
       "url": "http://127.0.0.1:11434/api/chat",
-      "model": "phi4-mini:latest"
+      "model": "qwen3.5-local:4b",
+      "fallback_model": "phi4-mini:latest"
     },
     "lm_studio": {
       "url": "http://127.0.0.1:1234/v1/chat/completions",
-      "model": "qwen/qwen3-vl-30b"
+      "model": "google/gemma-4-26b-a4b",
+      "use_loaded_model_fallback": true
     },
+    "tts_url": "http://127.0.0.1:8002/tts",
+    "tts_enabled": false,
+    "tts_voice": "Tetiana",
+    "use_llm_tts": false,
+    "response_decision_timeout_seconds": 90,
+    "graphiti_memory": {
+      "enabled": true,
+      "url": "http://127.0.0.1:8088",
+      "auto_start_service": true,
+      "service_dir": "/home/bandiu/PycharmProjects/graphiti-local-memory",
+      "startup_timeout_seconds": 90,
+      "timeout_seconds": 450,
+      "max_results": 5,
+      "ingest_episodes": true,
+      "ingest_mode": "queue",
+      "queue_path": "logs/graphiti_ingest_queue.jsonl",
+      "use_for_rag": true,
+      "include_episode_fallback": false,
+      "fallback_to_legacy_kg": true,
+      "source_description": "telegram family chat"
+    },
+    "allowed_target_chats": {
+      "сімейний": -443007242,
+      "family": -443007242
+    },
+
+
+
     "bot_name": "Жасмін",
     "bot_name_variations": [
       "жасмін",

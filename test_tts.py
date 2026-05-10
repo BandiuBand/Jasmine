@@ -2,6 +2,8 @@
 """
 Тестовий скрипт для української TTS
 """
+# Патчимо stanza ПЕРЕД будь-якими імпортами
+import stanza_patch  # noqa: F401
 
 from ukrainian_tts.tts import TTS, Voices, Stress
 import torch

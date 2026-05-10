@@ -28,11 +28,26 @@ from kg.extractor import extract
 from kg.store import KnowledgeGraph
 
 # --------------------------------------------------------------------------
-# Configuration (override via env vars)
+# Load configuration from config.json (with env var overrides)
 # --------------------------------------------------------------------------
-LLM_URL     = os.getenv("LLM_URL",     "http://127.0.0.1:1234/v1/chat/completions")
-LLM_MODEL   = os.getenv("LLM_MODEL",   "openai/gpt-oss-20b")
-EMBED_URL   = os.getenv("EMBED_URL",   "http://127.0.0.1:1234/v1/embeddings")
+def _load_config():
+    config_path = os.path.join(_BASE_DIR, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_CONFIG = _load_config()
+_JASMINE_CFG = _CONFIG.get("jasmine_filter", {})
+_LM_CFG = _JASMINE_CFG.get("lm_studio", {})
+_OLLAMA_CFG = _JASMINE_CFG.get("ollama", {})
+
+LLM_URL = os.getenv("LLM_URL", _LM_CFG.get("url", "http://127.0.0.1:1234/v1/chat/completions"))
+LLM_MODEL = os.getenv("LLM_MODEL", _LM_CFG.get("model", "openai/gpt-oss-20b"))
+OLLAMA_URL = os.getenv("OLLAMA_URL", _OLLAMA_CFG.get("url", "http://127.0.0.1:11434/api/chat"))
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", _OLLAMA_CFG.get("model", "gemma2:9b"))
+EMBED_URL = os.getenv("EMBED_URL", "http://127.0.0.1:1234/v1/embeddings")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
 
 LOGS_DIR      = os.path.join(_BASE_DIR, "logs")
@@ -41,7 +56,7 @@ REGISTRY_FILE = os.path.join(LOGS_DIR,  "chat_registry.json")
 
 # Matches: [HH:MM:SS] [type] optional:[sender]  text
 _LINE_RE = re.compile(
-    r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(\w+)\](?:\s+\[([^\]]+)\])?\s+(.+)$"
+    r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(\w+)\](?:\s+\[([^\]]+)\])?(?:\s+\[([^\]]+)\])?\s+(.+)$"
 )
 
 # --------------------------------------------------------------------------
@@ -87,7 +102,11 @@ def iter_log_messages():
                                 m = _LINE_RE.match(line.strip())
                                 if not m:
                                     continue
-                                ts, msg_type, sender, text = m.groups()
+                                ts, msg_type, third, fourth, text = m.groups()
+                                if third in {"private", "group", "supergroup", "channel"}:
+                                    sender = fourth or chat_identifier
+                                else:
+                                    sender = third or chat_identifier
                                 sender = sender or chat_identifier
                                 yield (file_path, i, ts, msg_type, sender,
                                        text, chat_identifier, date_str)
@@ -130,7 +149,7 @@ def process_messages(kg: KnowledgeGraph, registry: dict,
         if verbose:
             print(f"  [{sender}] {text[:70]}...")
 
-        items = extract(text, sender, chat_id_str, LLM_URL, LLM_MODEL)
+        items = extract(text, sender, chat_id_str, LLM_URL, LLM_MODEL, OLLAMA_URL, OLLAMA_MODEL)
         added = 0
         if items:
             added = kg.add_items(

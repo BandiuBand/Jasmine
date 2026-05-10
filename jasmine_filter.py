@@ -20,14 +20,25 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _BASE_DIR)
+from kg.store import KnowledgeGraph
+from kg.embeddings import get_embedding
+from kg.graphiti_client import (
+    GraphitiMemoryClient,
+    append_episode_queue,
+    format_graphiti_context,
+    graphiti_group_id,
+    message_reference_time,
+)
 _CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
 _LOGS_DIR = os.path.join(_BASE_DIR, "logs")
 _PROCESSED_FILE = os.path.join(_BASE_DIR, "jasmine_processed.json")
 _CONTEXT_STATE_FILE = os.path.join(_BASE_DIR, "jasmine_context_state.json")
 
-# Matches: [HH:MM:SS] [type] optional:[sender]  text
+# Matches old: [HH:MM:SS] [type] optional:[sender] text
+# Matches new: [HH:MM:SS] [type] [private|group|supergroup|channel] optional:[sender] text
 _LINE_RE = re.compile(
-    r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(\w+)\](?:\s+\[([^\]]+)\])?\s+(.+)$"
+    r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(\w+)\](?:\s+\[([^\]]+)\])?(?:\s+\[([^\]]+)\])?\s+(.+)$"
 )
 
 _STOPWORDS = {
@@ -105,16 +116,129 @@ def load_config() -> dict:
             },
             "lm_studio": {
                 "url": "http://127.0.0.1:1234/v1/chat/completions",
-                "model": "openai/gpt-oss-20b"
+                "model": "openai/gpt-oss-20b",
+                "use_loaded_model_fallback": True
             },
             "tts_url": "http://127.0.0.1:8002/tts",
             "tts_enabled": False,
             "tts_voice": "Tetiana",
             "use_llm_tts": False,  # Використовувати ЛЛМ для розпізнавання TTS запитів
+            "response_decision_timeout_seconds": 90,
             "bot_name": "Жасмін",
-            "bot_name_variations": ["жасмін", "jasmine", "jasmine", "жасміна"]
+            "bot_name_variations": ["жасмін", "jasmine", "jasmine", "жасміна"],
+            "graphiti_memory": {
+                "enabled": True,
+                "url": "http://127.0.0.1:8088",
+                "timeout_seconds": 450,
+                "max_results": 5,
+                "ingest_episodes": True,
+                "ingest_mode": "queue",
+                "queue_path": "logs/graphiti_ingest_queue.jsonl",
+                "use_for_rag": True,
+                "fallback_to_legacy_kg": True,
+                "source_description": "telegram family chat"
+            }
         }
     }
+
+
+def get_rag_context(text: str, chat_id: str, config: dict, max_results: int = 5) -> str:
+    """
+    Отримує релевантний контекст з Knowledge Graph через RAG.
+    
+    Args:
+        text: текст повідомлення для пошуку
+        chat_id: ідентифікатор чату
+        config: конфігурація
+        max_results: максимальна кількість результатів
+        
+    Returns:
+        Рядок з контекстом з БЗ або порожній рядок
+    """
+    graphiti_config = config.get("jasmine_filter", {}).get("graphiti_memory", {})
+    graphiti = GraphitiMemoryClient(graphiti_config)
+    if graphiti.enabled and graphiti_config.get("use_for_rag", True):
+        results = graphiti.search(
+            text,
+            group_id=graphiti_group_id(chat_id),
+            limit=max_results or graphiti.max_results,
+        )
+        context = format_graphiti_context(results)
+        if context:
+            print(f"[Jasmine] Знайдено {len(results)} результатів у Graphiti")
+            return context
+        if not graphiti.fallback_to_legacy_kg:
+            return ""
+
+    try:
+        # Отримуємо налаштування для embeddings
+        embed_url = os.getenv("EMBED_URL", "http://127.0.0.1:1234/v1/embeddings")
+        embed_model = os.getenv("EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
+        graph_path = os.path.join(_BASE_DIR, "kg", "graph.json")
+        
+        # Ініціалізуємо Knowledge Graph
+        kg = KnowledgeGraph(graph_path, embed_url, embed_model)
+        
+        # Отримуємо ембедінг для запиту
+        query_embedding = get_embedding(text, embed_url, embed_model)
+        if not query_embedding:
+            print("[Jasmine] Не вдалося отримати ембедінг для RAG")
+            return ""
+        
+        # Отримуємо numeric chat_id для фільтрації
+        numeric_chat_id = get_numeric_chat_id(chat_id)
+        
+        # Шукаємо релевантний контекст
+        rag_results = kg.search_rag(
+            query_embedding=query_embedding,
+            chat_id=numeric_chat_id,
+            min_similarity=0.70,
+            max_results=max_results
+        )
+        
+        if not rag_results:
+            return ""
+        
+        # Формуємо контекстний рядок
+        context_lines = []
+        for result in rag_results:
+            context_lines.append(
+                f"- [{result['type'].upper()}] {result['value']} "
+                f"(схожість: {result['similarity']:.2f}, згадок: {result['mentions']})"
+            )
+        
+        context_str = "Контекст з бази знань:\n" + "\n".join(context_lines)
+        print(f"[Jasmine] Знайдено {len(rag_results)} релевантних записів в БЗ")
+        return context_str
+        
+    except Exception as e:
+        print(f"[Jasmine] Помилка RAG: {e}")
+        return ""
+
+
+def add_message_to_graphiti(msg: Dict, config: dict, msg_id: str) -> bool:
+    """Best-effort ingestion of a Telegram log message into Graphiti memory."""
+    graphiti_config = config.get("jasmine_filter", {}).get("graphiti_memory", {})
+    if not graphiti_config.get("enabled", False) or not graphiti_config.get("ingest_episodes", True):
+        return False
+
+    payload = {
+        "name": f"{graphiti_group_id(msg.get('chat_id', 'unknown'))}_{msg_id}",
+        "body": msg.get("text", ""),
+        "group_id": graphiti_group_id(msg.get("chat_id", "unknown")),
+        "sender": msg.get("sender", "unknown"),
+        "reference_time": message_reference_time(msg),
+    }
+
+    if graphiti_config.get("ingest_mode", "queue") == "queue":
+        queue_path = graphiti_config.get("queue_path", "logs/graphiti_ingest_queue.jsonl")
+        if not os.path.isabs(queue_path):
+            queue_path = os.path.join(_BASE_DIR, queue_path)
+        append_episode_queue(queue_path, payload)
+        return True
+
+    graphiti = GraphitiMemoryClient(graphiti_config)
+    return graphiti.add_episode(**payload)
 
 
 def get_numeric_chat_id(chat_identifier: str) -> Optional[int]:
@@ -138,6 +262,19 @@ def get_numeric_chat_id(chat_identifier: str) -> Optional[int]:
     except Exception as e:
         print(f"[Jasmine] Error reading registry: {e}")
         return None
+
+
+def get_chat_kind(msg: Dict) -> str:
+    """Return Telegram chat kind: private/group/supergroup/channel/unknown."""
+    chat_type = (msg.get("chat_type") or "").lower()
+    if chat_type:
+        return chat_type
+
+    numeric_chat_id = get_numeric_chat_id(msg.get("chat_id", ""))
+    if numeric_chat_id is None:
+        return "unknown"
+    # Telegram private chats are positive ids; groups/supergroups are usually negative.
+    return "private" if int(numeric_chat_id) > 0 else "group"
 
 
 def get_last_messages(n: int) -> List[Dict]:
@@ -177,11 +314,18 @@ def get_last_messages(n: int) -> List[Dict]:
                                 m = _LINE_RE.match(line.strip())
                                 if not m:
                                     continue
-                                ts, msg_type, sender, text = m.groups()
+                                ts, msg_type, third, fourth, text = m.groups()
+                                if third in {"private", "group", "supergroup", "channel"}:
+                                    chat_type = third
+                                    sender = fourth or chat_identifier
+                                else:
+                                    chat_type = ""
+                                    sender = third or chat_identifier
                                 sender = sender or chat_identifier
                                 messages.append({
                                     "timestamp": ts,
                                     "msg_type": msg_type,
+                                    "chat_type": chat_type,
                                     "sender": sender,
                                     "text": text,
                                     "chat_id": chat_identifier,
@@ -198,19 +342,20 @@ def get_last_messages(n: int) -> List[Dict]:
     return messages[-n:] if len(messages) > n else messages
 
 
-def classify_with_ollama(text: str, config: dict) -> Tuple[bool, bool, str]:
+def classify_message(text: str, config: dict, chat_id: str = "unknown") -> Tuple[bool, bool, str]:
     """
-    Класифікує повідомлення через Ollama.
+    Класифікує повідомлення через LM Studio (з fallback на Ollama) з RAG контекстом з БЗ.
 
     Returns:
         (is_jasmine_address, is_question, explanation)
     """
-    ollama_config = config["jasmine_filter"]["ollama"]
     bot_name = config["jasmine_filter"]["bot_name"]
     variations = config["jasmine_filter"]["bot_name_variations"]
 
-    # Формуємо промпт для класифікації з більш суворими критеріями
-    prompt = f"""Ти — класифікатор повідомлень для сімейного чат-бота на ім'я "{bot_name}".
+    # Отримуємо RAG контекст з БЗ
+    rag_context = get_rag_context(text, chat_id, config, max_results=3)
+
+    system_prompt = f"""Ти — класифікатор повідомлень для сімейного чат-бота на ім'я "{bot_name}".
 Твоя задача - точно визначати коли боту слід відповідати, а коли ні.
 
 Правила для is_jasmine_address:
@@ -230,41 +375,44 @@ def classify_with_ollama(text: str, config: dict) -> Tuple[bool, bool, str]:
 - "is_jasmine_address": true/false
 - "is_question": true/false
 
-Без жодного пояснення, тільки JSON.
+Без жодного пояснення, тільки JSON."""
 
-Повідомлення: {text}"""
+    base_user_prompt = f"Повідомлення: {text}"
+    
+    # Додаємо RAG контекст якщо є
+    if rag_context:
+        user_prompt = f"""{base_user_prompt}
 
-    try:
-        response = requests.post(
-            ollama_config["url"],
-            json={
-                "model": ollama_config["model"],
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "temperature": 0.1  # Низька температура для стабільної класифікації
-            },
-            timeout=30
-        )
-        response.raise_for_status()
-        result = response.json()
+{rag_context}
 
-        # Ollama повертає response у форматі {"message": {"content": "..."}}
-        content = result.get("message", {}).get("content", "{}")
+Врахуй контекст з бази знань при класифікації."""
+    else:
+        user_prompt = base_user_prompt
 
-        # Парсимо JSON з відповіді
-        try:
-            classification = json.loads(content)
-            is_jasmine = classification.get("is_jasmine_address", False)
-            is_question = classification.get("is_question", False)
-            explanation = f"Ollama: jasmine={is_jasmine}, question={is_question}"
-            return is_jasmine, is_question, explanation
-        except json.JSONDecodeError:
-            # Якщо Ollama не повернув коректний JSON, пробуємо простий аналіз
-            return simple_classify(text, bot_name, variations)
-
-    except Exception as e:
-        print(f"[Jasmine] Ollama error: {e}")
+    # Викликаємо LLM з повним fallback ланцюжком
+    content = _call_llm_with_fallback(
+        config,
+        system_prompt,
+        user_prompt,
+        temperature=0.1,
+        task_name="classification",
+        use_low_temp=True
+    )
+    
+    if content is None:
         # Fallback до простого аналізу
+        return simple_classify(text, bot_name, variations)
+    
+    # Парсимо JSON з відповіді
+    try:
+        classification = json.loads(content)
+        is_jasmine = classification.get("is_jasmine_address", False)
+        is_question = classification.get("is_question", False)
+        rag_info = " + RAG" if rag_context else ""
+        explanation = f"classified{rag_info}: jasmine={is_jasmine}, question={is_question}"
+        return is_jasmine, is_question, explanation
+    except json.JSONDecodeError:
+        # Якщо не коректний JSON, пробуємо простий аналіз
         return simple_classify(text, bot_name, variations)
 
 
@@ -347,13 +495,159 @@ def calculate_message_relevance(text: str, config: dict) -> Tuple[float, Optiona
     return default_coefficient, None
 
 
-def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
+def _lm_studio_root_url(chat_completions_url: str) -> str:
+    for suffix in ("/v1/chat/completions", "/chat/completions"):
+        if chat_completions_url.endswith(suffix):
+            return chat_completions_url[: -len(suffix)]
+    return chat_completions_url.rstrip("/")
+
+
+def _lm_studio_loaded_models(lm_config: dict) -> List[str]:
+    """Return currently loaded LM Studio chat-capable model ids."""
+    root_url = _lm_studio_root_url(lm_config["url"])
+    try:
+        response = requests.get(f"{root_url}/api/v0/models", timeout=5)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+    except Exception as exc:
+        print(f"[Jasmine] LM Studio loaded-model check failed: {exc}")
+        return []
+
+    loaded = []
+    for item in data:
+        model_id = item.get("id")
+        model_type = item.get("type")
+        state = item.get("state")
+        if not model_id or state != "loaded" or model_type == "embeddings":
+            continue
+        loaded.append(model_id)
+    return loaded
+
+
+def _lm_studio_chat(
+    lm_config: dict,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout: int = 450,
+) -> str:
+    response = requests.post(
+        lm_config["url"],
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.8,
+            "max_tokens": 20000,
+            "top_p": 0.9,
+            "stream": False
+        },
+        timeout=timeout
+    )
+    response.raise_for_status()
+    result = response.json()
+    return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+
+def _call_llm_with_fallback(
+    config: dict,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.8,
+    task_name: str = "LLM task",
+    use_low_temp: bool = False
+) -> Optional[str]:
     """
-    Відправляє відфільтровані повідомлення до "мізків Жасмін" (LM Studio).
+    Universal LLM call with full fallback chain:
+    LM Studio (primary) → LM Studio loaded models → Ollama
+    
+    Args:
+        use_low_temp: If True, use temperature 0.1 (for classification/decision tasks)
+    
+    Returns:
+        Response content or None if all failed
+    """
+    lm_config = config["jasmine_filter"]["lm_studio"]
+    temp = 0.1 if use_low_temp else temperature
+    
+    # 1. Try primary LM Studio model
+    try:
+        content = _lm_studio_chat(
+            lm_config,
+            lm_config["model"],
+            system_prompt,
+            user_prompt,
+            timeout=450,
+        )
+        if content:
+            print(f"[Jasmine] {task_name}: LM Studio primary")
+            return content
+    except Exception as e:
+        print(f"[Jasmine] LM Studio primary error for {task_name}: {e}")
+    
+    # 2. Try loaded LM Studio models
+    if lm_config.get("use_loaded_model_fallback", True):
+        loaded_models = _lm_studio_loaded_models(lm_config)
+        for loaded_model in loaded_models:
+            if loaded_model == lm_config.get("model"):
+                continue
+            try:
+                content = _lm_studio_chat(
+                    lm_config,
+                    loaded_model,
+                    system_prompt,
+                    user_prompt,
+                    timeout=450,
+                )
+                if content:
+                    print(f"[Jasmine] {task_name}: LM Studio fallback ({loaded_model})")
+                    return content
+            except Exception as e:
+                print(f"[Jasmine] LM Studio fallback error ({loaded_model}): {e}")
+    
+    # 3. Final fallback to Ollama
+    print(f"[Jasmine] {task_name}: Fallback to Ollama...")
+    try:
+        ollama_config = config["jasmine_filter"]["ollama"]
+        fallback_model = ollama_config.get("fallback_model", ollama_config["model"])
+        
+        response = requests.post(
+            ollama_config["url"],
+            json={
+                "model": fallback_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "stream": False,
+                "temperature": temp
+            },
+            timeout=450
+        )
+        response.raise_for_status()
+        result = response.json()
+        content = result.get("message", {}).get("content", "")
+        
+        if content:
+            print(f"[Jasmine] {task_name}: Ollama fallback")
+            return content
+    except Exception as e:
+        print(f"[Jasmine] Ollama fallback error for {task_name}: {e}")
+    
+    return None
+
+
+def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknown", processed_ids: Optional[set] = None) -> Optional[str]:
+    """
+    Відправляє відфільтровані повідомлення до "мізків Жасмін" (LM Studio) з RAG контекстом.
+    Повідомлення з processed_ids маркуються як [ОБРОБЛЕНО].
 
     Returns:
         Response text or None if failed
     """
+    processed_ids = processed_ids or set()
     lm_config = config["jasmine_filter"]["lm_studio"]
 
     # Формуємо контекст з повідомлень
@@ -362,10 +656,18 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
     for sender, meta in sorted(roles.items(), key=lambda x: -x[1].get("messages", 0)):
         role_lines.append(f"- {sender}: роль={meta['role']}, повідомлень={meta['messages']}")
 
-    context = "\n".join([
-        f"[{msg['date_str']} {msg['timestamp']}] [{msg['sender']}]: {msg['text']}"
-        for msg in messages
-    ])
+    def _format_msg(msg: Dict) -> str:
+        msg_id = get_message_id(msg)
+        marker = " [ОБРОБЛЕНО]" if msg_id in processed_ids else ""
+        return f"[{msg['date_str']} {msg['timestamp']}] [{msg['sender']}]:{marker} {msg['text']}"
+    
+    context = "\n".join([_format_msg(msg) for msg in messages])
+
+    # Отримуємо RAG контекст з БЗ для останнього повідомлення
+    last_message = messages[-1] if messages else None
+    rag_context = ""
+    if last_message:
+        rag_context = get_rag_context(last_message["text"], chat_id, config, max_results=5)
 
     system_prompt = """Ти — Жасмін, інтелектуальна сімейна чат-бот помічниця. Ти — дівчина з почуттям гумору, яка знає що всім подобається, але не пихата.
 
@@ -376,10 +678,17 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
 - Використовуй емоції та емпатію в відповідях
 - Будь лаконічною, але інформативною
 - Адаптуй відповідь під контекст розмови
+- Використовуй знання з бази знань (якщо є) для кращих відповідей
 
-Відповідай українською мовою."""
+Відповідай українською мовою.
 
-    user_prompt = f"""Останні повідомлення в чаті:
+Ти можеш відправляти повідомлення в інші чати. Доступні чати: сімейний (family).
+Якщо користувач просить "напиши в сімейний чат" або подібне — почни відповідь з тегу [SEND_TO:ім'я_чату] на окремому рядку, потім текст повідомлення.
+Приклад:
+[SEND_TO:сімейний]
+Привіт усім, я тут з приватного чату!"""
+
+    base_user_prompt = f"""Останні повідомлення в чаті:
 
 Учасники та їх імовірні ролі:
 {chr(10).join(role_lines) if role_lines else "- невідомо"}
@@ -389,32 +698,83 @@ def send_to_lm_studio(messages: List[Dict], config: dict) -> Optional[str]:
 Дай розумну, корисну відповідь з урахуванням контексту.
 Якщо в контексті не видно прямого звернення до Жасмін або запиту на допомогу — відповідай дуже коротко і нейтрально."""
 
-    try:
-        response = requests.post(
-            lm_config["url"],
-            json={
-                "model": lm_config["model"],
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.8,
-                "max_tokens": 1024,
-                "top_p": 0.9,
-                "stream": False
-            },
-            timeout=120
-        )
-        response.raise_for_status()
-        result = response.json()
+    # Додаємо RAG контекст якщо є
+    if rag_context:
+        user_prompt = f"""{base_user_prompt}
 
-        # LM Studio повертає response у форматі OpenAI
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+{rag_context}
+
+Врахуй цей контекст з бази знань при формуванні відповіді."""
+    else:
+        user_prompt = base_user_prompt
+
+    try:
+        content = _lm_studio_chat(
+            lm_config,
+            lm_config["model"],
+            system_prompt,
+            user_prompt,
+        )
+        
+        if rag_context:
+            print(f"[Jasmine] Відповідь згенерована з RAG контекстом (LM Studio)")
+        
         return content
 
     except Exception as e:
         print(f"[Jasmine] LM Studio error: {e}")
-        return None
+        if lm_config.get("use_loaded_model_fallback", True):
+            loaded_models = _lm_studio_loaded_models(lm_config)
+            for loaded_model in loaded_models:
+                if loaded_model == lm_config.get("model"):
+                    continue
+                print(f"[Jasmine] Trying currently loaded LM Studio model: {loaded_model}")
+                try:
+                    content = _lm_studio_chat(
+                        lm_config,
+                        loaded_model,
+                        system_prompt,
+                        user_prompt,
+                    )
+                    if content:
+                        print(f"[Jasmine] LM Studio fallback model used: {loaded_model}")
+                        return content
+                except Exception as loaded_error:
+                    print(f"[Jasmine] Loaded LM Studio model failed ({loaded_model}): {loaded_error}")
+
+        print(f"[Jasmine] Fallback to Ollama...")
+        
+        # Fallback на Ollama якщо LM Studio недоступний
+        try:
+            ollama_config = config["jasmine_filter"]["ollama"]
+            fallback_model = ollama_config.get("fallback_model", ollama_config["model"])
+            
+            response = requests.post(
+                ollama_config["url"],
+                json={
+                    "model": fallback_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": False
+                },
+                timeout=450
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            content = result.get("message", {}).get("content", "")
+            
+            if rag_context:
+                print(f"[Jasmine] Відповідь згенерована з RAG контекстом (Ollama fallback)")
+            else:
+                print(f"[Jasmine] Відповідь згенерована через Ollama fallback")
+            
+            return content
+        except Exception as ollama_error:
+            print(f"[Jasmine] Ollama fallback error: {ollama_error}")
+            return None
 
 
 def text_to_speech(text: str, config: dict, voice: str = "Dmytro") -> Optional[bytes]:
@@ -467,7 +827,7 @@ def detect_tts_request_llm(text: str, config: dict) -> Tuple[bool, Optional[str]
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False
             },
-            timeout=30
+            timeout=450
         )
         response.raise_for_status()
         result = response.json()
@@ -602,6 +962,80 @@ def infer_chat_roles(messages: List[Dict], config: dict) -> Dict[str, Dict]:
     return roles
 
 
+def evaluate_response_usefulness(
+    msg: Dict,
+    config: dict,
+    recent_chat_messages: List[Dict],
+    is_jasmine: bool,
+    is_question: bool,
+) -> Tuple[Optional[bool], float, str]:
+    """
+    Ask the service LLM whether Jasmine should answer in a group chat.
+    Uses unified LLM call with LM Studio primary + fallback chain.
+    """
+    bot_name = config["jasmine_filter"].get("bot_name", "Жасмін")
+    bot_aliases = ", ".join(config["jasmine_filter"].get("bot_name_variations", []))
+    chat_id = msg.get("chat_id", "unknown")
+    rag_context = get_rag_context(msg.get("text", ""), chat_id, config, max_results=5)
+
+    recent_context = "\n".join(
+        f"[{m.get('timestamp', '')}] [{m.get('sender', '')}]: {m.get('text', '')}"
+        for m in recent_chat_messages[-8:]
+    )
+
+    system_prompt = f"""Ти — диспетчер сімейного чат-бота {bot_name}.
+Треба вирішити, чи варто боту відповісти в груповому чаті.
+
+Важливо:
+- Не вимагай явного звернення "{bot_name}" або aliases: {bot_aliases}.
+- Відповідай true, якщо бот може дати корисну, доречну, контекстну відповідь.
+- Відповідай true, якщо є питання, прохання, плутанина, корисна порада, нагадування, факт із пам'яті або контексту.
+- Відповідай false, якщо це приватна розмова між людьми, жарт без потреби, коротка реакція, або втручання буде зайвим.
+- Якщо не впевнений, краще false.
+
+Поверни ТІЛЬКИ JSON з полями:
+- "should_respond": true/false
+- "confidence": 0.0-1.0
+- "reason": "коротко українською" 
+"""
+
+    user_prompt = f"""Поточне повідомлення:
+[{msg.get('sender', '')}] {msg.get('text', '')}
+
+Ознаки:
+- explicit_bot_address: {is_jasmine}
+- question_like: {is_question}
+
+Останній контекст чату:
+{recent_context or "- немає"}
+
+{rag_context or "Контекст з пам'яті: немає"}"""
+
+    # Викликаємо unified LLM з повним fallback
+    content = _call_llm_with_fallback(
+        config,
+        system_prompt,
+        user_prompt,
+        temperature=0.0,
+        task_name="response_decision",
+        use_low_temp=True
+    )
+    
+    if content is None:
+        return None, 0.0, "LLM decision unavailable: all LLM backends failed"
+    
+    try:
+        match = re.search(r"\{[\s\S]*\}", content)
+        parsed = json.loads(match.group(0) if match else content)
+        should = bool(parsed.get("should_respond", False))
+        confidence = float(parsed.get("confidence", 0.0))
+        reason = str(parsed.get("reason", "LLM decision"))
+        return should, max(0.0, min(confidence, 1.0)), reason
+    except Exception as exc:
+        print(f"[Jasmine] LLM response-decision parse error: {exc}")
+        return None, 0.0, f"LLM decision unavailable: {exc}"
+
+
 def _parse_dt(msg: Dict) -> Optional[datetime]:
     try:
         return datetime.strptime(f"{msg['date_str']} {msg['timestamp']}", "%Y-%m-%d %H:%M:%S")
@@ -627,8 +1061,12 @@ def decide_response(msg: Dict, config: dict, context_state: Dict, recent_chat_me
     text = msg.get("text", "")
     text_norm = _normalize_text(text)
     chat_id = msg.get("chat_id", "unknown")
+    chat_kind = get_chat_kind(msg)
     topic_keywords = _extract_keywords(text)
     relevance, industry = calculate_message_relevance(text, config)
+
+    if chat_kind == "private":
+        return True, 1.0, ["приватний чат: відповідаємо без явного виклику"]
 
     if is_jasmine:
         score += 0.8
@@ -675,7 +1113,27 @@ def decide_response(msg: Dict, config: dict, context_state: Dict, recent_chat_me
             score += 0.1
             reasons.append("локальна зв'язність з попереднім повідомленням")
 
-    should_respond = score >= 0.65
+    if is_jasmine:
+        should_respond = True
+    else:
+        llm_decision, llm_confidence, llm_reason = evaluate_response_usefulness(
+            msg,
+            config,
+            recent_chat_messages,
+            is_jasmine,
+            is_question,
+        )
+        if llm_decision is not None:
+            reasons.append(f"LLM-рішення: {llm_reason}")
+            score = max(score, llm_confidence)
+            should_respond = llm_decision and llm_confidence >= 0.55
+        else:
+            reasons.append(llm_reason)
+            if is_question and score >= 0.55:
+                should_respond = True
+                reasons.append("fallback: питання з достатнім контекстним скором")
+            else:
+                should_respond = score >= 0.65
     return should_respond, round(score, 3), reasons
 
 
@@ -767,6 +1225,45 @@ def send_audio_to_chat(chat_id: str, audio: bytes, config: dict) -> bool:
         return False
 
 
+def _parse_send_to_target(response: str, config: dict) -> tuple[str, int | None]:
+    """
+    Parse [SEND_TO:target] tag from response and resolve to numeric chat ID.
+    
+    Returns:
+        (cleaned_response, target_numeric_chat_id or None)
+    """
+    import re
+    
+    allowed_chats = config.get("jasmine_filter", {}).get("allowed_target_chats", {})
+    if not allowed_chats:
+        return response, None
+    
+    # Look for [SEND_TO:chat_name] pattern
+    pattern = r'^\[SEND_TO:([^\]]+)\]\s*\n?'
+    match = re.match(pattern, response.strip())
+    
+    if not match:
+        return response, None
+    
+    target_name = match.group(1).strip().lower()
+    target_chat_id = None
+    
+    # Try to match by name
+    for name, chat_id in allowed_chats.items():
+        if name.lower() == target_name:
+            target_chat_id = chat_id
+            break
+    
+    if not target_chat_id:
+        print(f"[Jasmine] SEND_TO target '{target_name}' not in allowed_target_chats")
+        return response, None
+    
+    # Clean the response by removing the tag
+    cleaned = re.sub(pattern, '', response.strip(), count=1)
+    print(f"[Jasmine] Cross-chat send to '{target_name}' ({target_chat_id})")
+    return cleaned, target_chat_id
+
+
 def process_messages(config: dict, verbose: bool = True) -> Dict:
     """
     Обробляє повідомлення: фільтрує та відправляє до LM Studio.
@@ -786,7 +1283,8 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
         "filtered": 0,
         "sent_to_lm": 0,
         "tts_generated": 0,
-        "skipped": 0
+        "skipped": 0,
+        "graphiti_ingested": 0,
     }
 
     if not messages:
@@ -815,8 +1313,13 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
         
         # Додаємо повідомлення в список оброблених (незалежно від результату класифікації)
         processed_ids.add(msg_id)
+
+        if add_message_to_graphiti(msg, config, msg_id):
+            stats["graphiti_ingested"] += 1
+            if verbose:
+                print(f"[Jasmine] 🧠 Graphiti episode: [{msg['sender']}] {msg['text'][:50]}...")
         
-        is_jasmine, is_question, explanation = classify_with_ollama(msg["text"], config)
+        is_jasmine, is_question, explanation = classify_message(msg["text"], config, msg["chat_id"])
 
         # Перевіряємо чи це запит на озвучку
         is_tts, text_to_speak = detect_tts_request(msg["text"], config, use_llm=use_llm_tts)
@@ -864,7 +1367,7 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
         for item in filtered_messages:
             chat_id = item["msg"]["chat_id"]
             context_messages = item.get("context") or [item["msg"]]
-            response = send_to_lm_studio(context_messages, config)
+            response = send_to_lm_studio(context_messages, config, chat_id, processed_ids)
 
             if not response:
                 if verbose:
@@ -900,20 +1403,27 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
             else:
                 if verbose:
                     print(f"[Jasmine] Відправляю текстову відповідь...")
-                numeric_chat_id = get_numeric_chat_id(chat_id)
+                
+                # Parse SEND_TO tag for cross-chat messaging
+                response_cleaned, target_chat_id = _parse_send_to_target(response, config)
+                
+                # Use target chat if specified and allowed, otherwise use original
+                numeric_chat_id = target_chat_id if target_chat_id else get_numeric_chat_id(chat_id)
+                
                 if numeric_chat_id:
                     import subprocess
                     import sys
                     bot_path = os.path.join(_BASE_DIR, "bot.py")
                     result = subprocess.run(
-                        [sys.executable, bot_path, "--send", str(numeric_chat_id), response],
+                        [sys.executable, bot_path, "--send", str(numeric_chat_id), response_cleaned],
                         capture_output=True,
                         text=True,
                         timeout=30,
                         cwd=_BASE_DIR
                     )
                     if result.returncode == 0 and verbose:
-                        print(f"[Jasmine] Текст відправлено в чат {chat_id}")
+                        target_desc = target_chat_id if target_chat_id else chat_id
+                        print(f"[Jasmine] Текст відправлено в чат {target_desc}")
                     elif verbose:
                         print(f"[Jasmine] Помилка відправки тексту: {result.stderr}")
     elif verbose:

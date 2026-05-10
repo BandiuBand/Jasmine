@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from datetime import datetime
 import requests
 from telegram import Update, Chat
@@ -36,7 +37,7 @@ def _update_registry(identifier: str, chat_id: int):
         json.dump(registry, f, ensure_ascii=False, indent=2)
 
 def save_message(chat_id: int, chat_title: str, text: str,
-                 message_type: str = "text", sender: str = ""):
+                 message_type: str = "text", sender: str = "", chat_type: str = "unknown"):
     """Зберігає повідомлення в структуру logs/рік/місяць/день/чат.txt"""
     now = datetime.now()
     log_dir = os.path.join(_BASE_DIR, "logs", str(now.year), f"{now.month:02d}", f"{now.day:02d}")
@@ -51,8 +52,9 @@ def save_message(chat_id: int, chat_title: str, text: str,
     _update_registry(identifier, chat_id)
 
     timestamp = now.strftime("%H:%M:%S")
+    chat_type_part = f" [{chat_type}]" if chat_type else ""
     sender_part = f" [{sender}]" if sender else ""
-    log_entry = f"[{timestamp}] [{message_type}]{sender_part} {text}\n"
+    log_entry = f"[{timestamp}] [{message_type}]{chat_type_part}{sender_part} {text}\n"
 
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(log_entry)
@@ -82,7 +84,7 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text and text != "null":
         chat_title = chat.title or chat.username or str(chat.id)
         sender = user.username or user.first_name or str(user.id)
-        save_message(chat.id, chat_title, text, "voice", sender)
+        save_message(chat.id, chat_title, text, "voice", sender, chat.type)
         await update.message.reply_text(text)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,7 +98,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     chat_title = chat.title or chat.username or str(chat.id)
     sender = user.username or user.first_name or str(user.id) if user else ""
-    save_message(chat.id, chat_title, text, "text", sender)
+    save_message(chat.id, chat_title, text, "text", sender, chat.type)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показує chat_id при команді /start"""
