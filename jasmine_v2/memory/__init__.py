@@ -1,5 +1,6 @@
 """Jasmine v2 memory module."""
 
+from jasmine_v2.memory.graphiti_http_client import GraphitiHttpClient
 from jasmine_v2.memory.graph_scope import (
     MemoryGraphScope,
     get_active_group_ids,
@@ -56,4 +57,5 @@ __all__ = [
     "MemoryGroupRef",
     "RetrievalPlan",
     "build_default_retrieval_plan",
+    "GraphitiHttpClient",
 ]
