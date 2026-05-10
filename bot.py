@@ -116,10 +116,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Jasmine v2 shadow mode - не впливає на стару логіку
     config = _load_config()
     v2_cfg = config.get("jasmine_v2", {})
-    if v2_cfg.get("enabled", False):
+    v2_enabled = v2_cfg.get("enabled", False)
+    v2_shadow_mode = v2_cfg.get("shadow_mode", False)
+
+    print(
+        f"[Jasmine v2 shadow] config: enabled={v2_enabled}, "
+        f"shadow_mode={v2_shadow_mode}",
+        flush=True,
+    )
+
+    if v2_enabled and v2_shadow_mode:
         try:
             message = update.effective_message
             if message and message.text:
+                print("[Jasmine v2 shadow] calling run_telegram_shadow_event", flush=True)
                 run_telegram_shadow_event(
                     chat_id=chat.id if chat else "unknown",
                     user_id=user.id if user else "unknown",

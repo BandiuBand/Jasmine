@@ -28,6 +28,12 @@ def run_telegram_shadow_event(
     """
 
     try:
+        print(
+            f"[Jasmine v2 shadow] received: chat_id={chat_id} "
+            f"user_id={user_id} text={text[:120]!r}",
+            flush=True,
+        )
+
         event = IncomingEvent(
             transport="telegram_shadow",
             chat_id=str(chat_id),
@@ -38,6 +44,12 @@ def run_telegram_shadow_event(
         )
 
         result = run_event(event)
+
+        print(
+            f"[Jasmine v2 shadow] result: intent={result.get('intent')} "
+            f"scope={result.get('scope')} response={result.get('final_response')!r}",
+            flush=True,
+        )
 
         logger.info(
             "[Jasmine v2 shadow] chat_id=%s user_id=%s intent=%s scope=%s response=%r",
@@ -50,10 +62,12 @@ def run_telegram_shadow_event(
 
         debug_log = result.get("debug_log") or []
         for line in debug_log:
+            print(f"[Jasmine v2 shadow debug] {line}", flush=True)
             logger.debug("[Jasmine v2 shadow] %s", line)
 
         return result
 
-    except Exception:
+    except Exception as exc:
+        print(f"[Jasmine v2 shadow] failed: {type(exc).__name__}: {exc}", flush=True)
         logger.exception("[Jasmine v2 shadow] failed")
         return None
