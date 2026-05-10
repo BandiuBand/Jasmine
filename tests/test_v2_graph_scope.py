@@ -123,7 +123,7 @@ def test_memory_graph_scope_frozen():
 
     # Should not be able to modify (frozen dataclass)
     try:
-        scope.time_id = "2026-05-11"
+        scope.time_id = "2026-05-11"  # noqa: B010
         assert False, "Should have raised FrozenInstanceError"
     except Exception:
         pass  # Expected

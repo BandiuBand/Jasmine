@@ -9,6 +9,12 @@ from jasmine_v2.memory.graph_scope import (
     make_month_scope,
     make_week_scope,
 )
+from jasmine_v2.memory.retrieval_plan import (
+    MemoryGroupRef,
+    MemoryGroupRole,
+    RetrievalPlan,
+    build_default_retrieval_plan,
+)
 from jasmine_v2.memory.spaces import (
     MemorySpace,
     make_chat_space,
@@ -46,4 +52,8 @@ __all__ = [
     "make_longterm_scope",
     "get_active_scopes",
     "get_active_group_ids",
+    "MemoryGroupRole",
+    "MemoryGroupRef",
+    "RetrievalPlan",
+    "build_default_retrieval_plan",
 ]
