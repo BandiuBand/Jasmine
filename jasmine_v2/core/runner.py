@@ -1,5 +1,6 @@
 from dataclasses import asdict
 
+from jasmine_v2.core.config import load_config
 from jasmine_v2.core.events import IncomingEvent
 from jasmine_v2.core.graph import build_jasmine_graph
 
@@ -19,6 +20,7 @@ def run_event(event: IncomingEvent) -> dict:
 
     initial_state = {
         "event": asdict(event),
+        "config": load_config(),
         "errors": [],
         "debug_log": [],
     }
