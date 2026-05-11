@@ -1208,27 +1208,23 @@ def decide_response(msg: Dict, config: dict, context_state: Dict, recent_chat_me
     return should_respond, round(score, 3), reasons
 
 
-def build_context_window(messages: List[Dict], target_idx: int, max_messages: int = 12) -> List[Dict]:
-    """Будує контекстне вікно в межах однієї теми та одного чату."""
+def build_context_window(messages: List[Dict], target_idx: int, max_messages: int = 25) -> List[Dict]:
+    """Будує контекстне вікно з останніх повідомлень чату.
+
+    При 50k контексті збираємо фіксовану кількість останніх повідомлень
+    без різкого break по topic overlap — модель сама розбере релевантність.
+    """
     if target_idx < 0 or target_idx >= len(messages):
         return []
     target = messages[target_idx]
     chat_id = target.get("chat_id")
-    target_keys = _extract_keywords(target.get("text", ""))
 
     window = [target]
     i = target_idx - 1
     while i >= 0 and len(window) < max_messages:
         msg = messages[i]
-        if msg.get("chat_id") != chat_id:
-            i -= 1
-            continue
-        keys = _extract_keywords(msg.get("text", ""))
-        overlap = _topic_overlap(target_keys, keys)
-        if overlap >= 0.2 or i >= target_idx - 3:
+        if msg.get("chat_id") == chat_id:
             window.append(msg)
-        else:
-            break
         i -= 1
 
     return list(reversed(window))

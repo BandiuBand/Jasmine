@@ -2,6 +2,7 @@ import json
 import os
 import hashlib
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,8 @@ class GraphitiMemoryClient:
         )
         self.fallback_to_legacy_kg = bool(config.get("fallback_to_legacy_kg", True))
         self.include_episode_fallback = bool(config.get("include_episode_fallback", False))
+        self.request_retries = int(config.get("request_retries", 3))
+        self.retry_backoff_seconds = float(config.get("retry_backoff_seconds", 2.0))
 
     def health(self) -> Dict[str, Any]:
         if not self.enabled:
@@ -55,10 +58,10 @@ class GraphitiMemoryClient:
             payload["reference_time"] = reference_time
 
         try:
-            response = requests.post(
+            response = self._request_with_retries(
+                "post",
                 f"{self.base_url}/episodes",
                 json=payload,
-                timeout=self.timeout,
             )
             response.raise_for_status()
             return True
@@ -76,10 +79,10 @@ class GraphitiMemoryClient:
             "include_episodes": self.include_episode_fallback,
         }
         try:
-            response = requests.post(
+            response = self._request_with_retries(
+                "post",
                 f"{self.base_url}/search",
                 json=payload,
-                timeout=self.timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -88,6 +91,32 @@ class GraphitiMemoryClient:
         except Exception as exc:
             print(f"[Graphiti] search failed: {exc}")
             return []
+
+    def _request_with_retries(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        last_error: Exception | None = None
+        attempts = max(1, self.request_retries + 1)
+        for attempt in range(attempts):
+            try:
+                response = requests.request(method, url, timeout=self.timeout, **kwargs)
+                if response.status_code not in {429, 500, 502, 503, 504}:
+                    return response
+                last_error = requests.HTTPError(
+                    f"{response.status_code} transient response from {url}"
+                )
+            except requests.RequestException as exc:
+                last_error = exc
+
+            if attempt < attempts - 1:
+                delay = self.retry_backoff_seconds * (2 ** attempt)
+                print(
+                    f"[Graphiti] transient failure, retry {attempt + 1}/{attempts - 1} "
+                    f"in {delay:.1f}s: {last_error}"
+                )
+                time.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Graphiti request failed without an error: {url}")
 
 
 def graphiti_group_id(chat_id: str) -> str:
