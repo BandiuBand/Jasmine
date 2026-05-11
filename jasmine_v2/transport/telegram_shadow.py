@@ -28,6 +28,8 @@ def _write_shadow_log(
     day_memory_group_id: str = "",
     active_groups_count: int = 0,
     day_memory_write_status: str = "",
+    memory_read_status: str = "",
+    memory_items_count: int = 0,
 ) -> None:
     """Append structured line to shadow log file."""
     try:
@@ -37,7 +39,8 @@ def _write_shadow_log(
             line = (
                 f"{timestamp}\t{chat_id}\t{user_id}\t{intent}\t{confidence}\t"
                 f"{message[:200]!r}\t{response[:200]!r}\t"
-                f"{primary_key}\t{day_memory_group_id}\t{active_groups_count}\t{day_memory_write_status}\n"
+                f"{primary_key}\t{day_memory_group_id}\t{active_groups_count}\t{day_memory_write_status}\t"
+                f"{memory_read_status}\t{memory_items_count}\n"
             )
             f.write(line)
     except Exception as e:
@@ -57,6 +60,8 @@ def _write_snapshot(
     day_memory_group_id: str = "",
     active_memory_group_ids: list[str] | None = None,
     day_memory_write_status: str = "",
+    memory_read_status: str = "",
+    memory_items_count: int = 0,
 ) -> None:
     """Write JSON snapshot of the shadow event."""
     try:
@@ -78,6 +83,8 @@ def _write_snapshot(
             "day_memory_group_id": day_memory_group_id,
             "active_memory_group_ids": active_memory_group_ids or [],
             "day_memory_write_status": day_memory_write_status,
+            "memory_read_status": memory_read_status,
+            "memory_items_count": memory_items_count,
         }
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -132,6 +139,8 @@ def run_telegram_shadow_event(
         day_memory_group_id = result.get("day_memory_group_id", "")
         active_memory_group_ids = result.get("active_memory_group_ids") or []
         day_memory_write_status = result.get("day_memory_write_status", "")
+        memory_read_status = result.get("memory_read_status", "")
+        memory_items_count = len(result.get("memory_context", []))
 
         print(
             f"[Jasmine v2 shadow] result: intent={intent} "
@@ -152,6 +161,8 @@ def run_telegram_shadow_event(
             day_memory_group_id=day_memory_group_id,
             active_groups_count=len(active_memory_group_ids),
             day_memory_write_status=day_memory_write_status,
+            memory_read_status=memory_read_status,
+            memory_items_count=memory_items_count,
         )
 
         # Write JSON snapshot
@@ -168,6 +179,8 @@ def run_telegram_shadow_event(
             day_memory_group_id=day_memory_group_id,
             active_memory_group_ids=active_memory_group_ids,
             day_memory_write_status=day_memory_write_status,
+            memory_read_status=memory_read_status,
+            memory_items_count=memory_items_count,
         )
 
         logger.info(

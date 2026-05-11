@@ -33,6 +33,14 @@ def main():
     active_groups = result.get("active_memory_group_ids", [])
     print(f"active_memory_group_ids: {active_groups} (count: {len(active_groups)})")
     print(f"day_memory_write_status: {result.get('day_memory_write_status', 'N/A')}")
+    print(f"memory_read_status: {result.get('memory_read_status', 'N/A')}")
+    memory_context = result.get("memory_context", [])
+    print(f"memory_context count: {len(memory_context)}")
+    for i, item in enumerate(memory_context[:3], start=1):
+        preview = str(item)[:120]
+        print(f"  [{i}] {preview}")
+    if len(memory_context) > 3:
+        print(f"  ... and {len(memory_context) - 3} more")
 
     print("\n=== Debug log ===")
     for line in result.get("debug_log", []):

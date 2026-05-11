@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from jasmine_v2.core.events import IncomingEvent
 from jasmine_v2.core.runner import run_event
 
@@ -23,6 +28,11 @@ def test_v2_simple_chat_smoke():
     assert "active_memory_group_ids" in result
     assert result["day_memory_write_status"] == "dry_run"
 
+    # Active memory context assertions (not dependent on real Graphiti)
+    assert "memory_read_status" in result
+    assert "memory_context" in result
+    assert isinstance(result["memory_context"], list)
+
 
 def test_v2_web_search_routing_smoke():
     event = IncomingEvent(
@@ -43,3 +53,26 @@ def test_v2_web_search_routing_smoke():
     assert "day_memory_group_id" in result
     assert "active_memory_group_ids" in result
     assert result["day_memory_write_status"] == "dry_run"
+
+    # Active memory context assertions (not dependent on real Graphiti)
+    assert "memory_read_status" in result
+    assert "memory_context" in result
+    assert isinstance(result["memory_context"], list)
+
+
+def run_all_tests():
+    """Run all tests."""
+    print("=" * 50)
+    print("Running smoke tests")
+    print("=" * 50)
+
+    test_v2_simple_chat_smoke()
+    test_v2_web_search_routing_smoke()
+
+    print("=" * 50)
+    print("All tests passed!")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    run_all_tests()
