@@ -35,6 +35,8 @@ _CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
 _LOGS_DIR = os.path.join(_BASE_DIR, "logs")
 _PROCESSED_FILE = os.path.join(_BASE_DIR, "jasmine_processed.json")
 _CONTEXT_STATE_FILE = os.path.join(_BASE_DIR, "jasmine_context_state.json")
+_jasmine_reply_cache: Dict[str, List] = {}
+_JASMINE_REPLY_CACHE_MAX = 20
 
 # Matches old: [HH:MM:SS] [type] optional:[sender] text
 # Matches new: [HH:MM:SS] [type] [private|group|supergroup|channel] optional:[sender] text
@@ -755,7 +757,14 @@ def send_to_lm_studio(messages: List[Dict], config: dict, chat_id: str = "unknow
 Якщо користувач просить "напиши в сімейний чат" або подібне — почни відповідь з тегу [SEND_TO:ім'я_чату] на окремому рядку, потім текст повідомлення.
 Приклад:
 [SEND_TO:сімейний]
-Привіт усім, я тут з приватного чату!"""
+Привіт усім, я тут з приватного чату!
+
+TTS OUTPUT RULE (applies to every response):
+- FIRST check the last message for any request to speak, read aloud, or voice something (e.g. "озвуч", "прочитай", "скажи голосом", "озвуч це", "прочитай вголос", "озвуч те що він сказав", "скажи її повідомлення голосом", or any equivalent phrasing). The last message only serves as the TRIGGER — you must still scan the ENTIRE conversation context to locate the exact text that should be spoken.
+- The text to speak can come from ANYWHERE in the conversation: a quoted sentence inside the request, an earlier message from any participant, a message Jasmine herself previously sent (including ones tagged [🔊 VOICE] — those are past TTS outputs whose text can be re-spoken), or even a message several turns back. Words like "це", "той", "вище", "вона", "він", "її", "його" in the request refer to content already present in the chat history.
+- When you find the target text, append on a NEW LINE at the very end of your reply: [TTS:exact text to be spoken here]
+- Do NOT emit [TTS:] for TTS requests found in earlier messages — those are already handled.
+- Do NOT emit [TTS:] if you cannot confidently determine what text to speak."""
 
     base_user_prompt = f"""Останні повідомлення в чаті:
 
@@ -991,6 +1000,35 @@ def get_previous_message(messages: List[Dict], current_index: int) -> Optional[s
     if current_index > 0 and current_index < len(messages):
         return messages[current_index - 1]["text"]
     return None
+
+
+def _cache_jasmine_reply(chat_id: str, text: str, is_tts: bool = False) -> None:
+    """Cache Jasmine's reply for context injection into future LLM calls."""
+    now = datetime.now()
+    label = "[\U0001f50a VOICE] " if is_tts else ""
+    entry = {
+        "timestamp": now.strftime("%H:%M:%S"),
+        "date_str": now.strftime("%Y-%m-%d"),
+        "dt": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "sender": "\u0416\u0430\u0441\u043c\u0456\u043d",
+        "text": f"{label}{text}",
+        "chat_id": chat_id,
+        "msg_type": "jasmine_tts" if is_tts else "jasmine_reply",
+    }
+    cache = _jasmine_reply_cache.setdefault(chat_id, [])
+    cache.append(entry)
+    if len(cache) > _JASMINE_REPLY_CACHE_MAX:
+        _jasmine_reply_cache[chat_id] = cache[-_JASMINE_REPLY_CACHE_MAX:]
+
+
+def _inject_jasmine_replies(context_messages: List[Dict], chat_id: str) -> List[Dict]:
+    """Merge Jasmine's cached replies into context messages, sorted by dt."""
+    cached = _jasmine_reply_cache.get(chat_id, [])
+    if not cached:
+        return context_messages
+    merged = list(context_messages) + list(cached)
+    merged.sort(key=lambda m: m.get("dt", ""))
+    return merged
 
 
 def _normalize_text(text: str) -> str:
@@ -1331,6 +1369,20 @@ def _parse_send_to_target(response: str, config: dict) -> tuple[str, int | None]
     return cleaned, target_chat_id
 
 
+def _parse_tts_tag(response: str) -> Tuple[str, Optional[str]]:
+    """Extract [TTS:text] tag from LLM response.
+
+    Returns:
+        (cleaned_response, tts_text_or_None)
+    """
+    match = re.search(r'\[TTS:(.+?)\]', response, re.DOTALL)
+    if match:
+        tts_text = match.group(1).strip()
+        cleaned = re.sub(r'\[TTS:.+?\]', '', response, flags=re.DOTALL).strip()
+        return cleaned, tts_text
+    return response, None
+
+
 def process_messages(config: dict, verbose: bool = True) -> Dict:
     """
     Обробляє повідомлення: фільтрує та відправляє до LM Studio.
@@ -1363,10 +1415,6 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
         print(f"[Jasmine] Перевіряю {len(messages)} останніх повідомлень...")
 
     filtered_by_chat: Dict[str, Dict] = {}
-    tts_requests = []  # Зберігаємо запити на озвучку
-
-    # Отримуємо налаштування ЛЛМ для TTS
-    use_llm_tts = config.get("jasmine_filter", {}).get("use_llm_tts", False)
 
     for idx, msg in enumerate(messages):
         msg_id = get_message_id(msg)
@@ -1388,32 +1436,29 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
         
         is_jasmine, is_question, explanation = classify_message(msg["text"], config, msg["chat_id"])
 
-        # Перевіряємо чи це запит на озвучку
-        is_tts, text_to_speak = detect_tts_request(msg["text"], config, use_llm=use_llm_tts)
-        if is_tts:
-            tts_requests.append({
-                "msg": msg,
-                "text": text_to_speak,
-                "index": idx,
-                "msg_id": msg_id
-            })
-            if verbose:
-                print(f"[Jasmine] 🔊 TTS запит: [{msg['sender']}] {msg['text'][:50]}...")
-            continue  # Не відправляємо в LM Studio якщо це TTS запит
+        # TTS-запит форсуємо до LLM — вона сама визначить текст через [TTS:] тег
+        is_tts = detect_tts_request(msg["text"], config, use_llm=False)[0]
+        if is_tts and verbose:
+            print(f"[Jasmine] 🔊 TTS запит → LLM: [{msg['sender']}] {msg['text'][:50]}...")
 
         # Нова логіка рішення чи відповідати
         recent_in_chat = [m for m in messages[max(0, idx - 8): idx + 1] if m["chat_id"] == msg["chat_id"]]
-        should_respond, score, reasons = decide_response(
-            msg, config, context_state, recent_in_chat, is_jasmine, is_question
-        )
+        if is_tts:
+            should_respond, score, reasons = True, 1.0, ["tts_request"]
+        else:
+            should_respond, score, reasons = decide_response(
+                msg, config, context_state, recent_in_chat, is_jasmine, is_question
+            )
 
         if should_respond:
             stats["filtered"] += 1
             context_window = build_context_window(messages, idx)
+            context_window = _inject_jasmine_replies(context_window, msg["chat_id"])
             filtered_by_chat[msg["chat_id"]] = {
                 "msg": msg,
                 "msg_id": msg_id,
-                "context": context_window
+                "context": context_window,
+                "is_tts": is_tts,
             }
 
             if verbose:
@@ -1457,22 +1502,43 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
             }
             chat_state["active_until"] = (now_dt + timedelta(minutes=15)).isoformat(timespec="seconds")
 
+            # Parse TTS tag injected by LLM when it detected a TTS request in context
+            response_text, tts_text = _parse_tts_tag(response)
+            voice = config.get("jasmine_filter", {}).get("tts_voice", "Tetiana")
+
+            if tts_text:
+                stats["tts_generated"] += 1
+                audio = text_to_speech(tts_text, config, voice)
+                if audio:
+                    if verbose:
+                        print(f"[Jasmine] \U0001f50a TTS від LLM: {tts_text[:60]}... ({len(audio)} байт)")
+                    send_audio_to_chat(chat_id, audio, config)
+                    _cache_jasmine_reply(chat_id, tts_text, is_tts=True)
+                elif verbose:
+                    print(f"[Jasmine] Не вдалося згенерувати аудіо для TTS тегу")
+
+            reply_body = response_text if tts_text else response
+            if not reply_body:
+                continue
+
             # Озвучуємо відповідь якщо TTS увімкнено, інакше відправляємо текст
             tts_enabled = config.get("jasmine_filter", {}).get("tts_enabled", False)
-            if tts_enabled:
-                voice = config.get("jasmine_filter", {}).get("tts_voice", "Tetiana")
-                audio = text_to_speech(response, config, voice)
-                if audio and verbose:
-                    print(f"[Jasmine] Аудіо згенеровано ({len(audio)} байт)")
+            if tts_enabled and not tts_text:
+                audio = text_to_speech(reply_body, config, voice)
+                if audio:
+                    if verbose:
+                        print(f"[Jasmine] Аудіо згенеровано ({len(audio)} байт)")
                     send_audio_to_chat(chat_id, audio, config)
+                    _cache_jasmine_reply(chat_id, reply_body, is_tts=True)
                 elif verbose:
                     print(f"[Jasmine] Не вдалося згенерувати аудіо")
             else:
+                _cache_jasmine_reply(chat_id, reply_body)
                 if verbose:
                     print(f"[Jasmine] Відправляю текстову відповідь...")
                 
                 # Parse SEND_TO tag for cross-chat messaging
-                response_cleaned, target_chat_id = _parse_send_to_target(response, config)
+                response_cleaned, target_chat_id = _parse_send_to_target(reply_body, config)
                 
                 # Use target chat if specified and allowed, otherwise use original
                 numeric_chat_id = target_chat_id if target_chat_id else get_numeric_chat_id(chat_id)
@@ -1525,46 +1591,6 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
                         )
     elif verbose:
         print(f"[Jasmine] Немає повідомлень, які потребують відповіді")
-
-    # Обробляємо TTS запити
-    if tts_requests:
-        voice = config.get("jasmine_filter", {}).get("tts_voice", "Tetiana")
-        if verbose:
-            print(f"[Jasmine] Обробляю {len(tts_requests)} TTS запитів...")
-
-        for tts_req in tts_requests:
-            msg = tts_req["msg"]
-            text_to_speak = tts_req["text"]
-            idx = tts_req["index"]
-            msg_id = tts_req["msg_id"]
-
-            # Якщо запит на попереднє повідомлення
-            if text_to_speak == "PREVIOUS_MESSAGE":
-                text_to_speak = get_previous_message(messages, idx)
-                if not text_to_speak:
-                    if verbose:
-                        print(f"[Jasmine] Немає попереднього повідомлення")
-                    continue
-
-            if not text_to_speak:
-                if verbose:
-                    print(f"[Jasmine] Немає тексту для озвучки")
-                continue
-
-            # Генеруємо аудіо
-            audio = text_to_speech(text_to_speak, config, voice)
-            if audio:
-                stats["tts_generated"] += 1
-                if verbose:
-                    print(f"[Jasmine] 🔊 Озвучено: {text_to_speak[:50]}... ({len(audio)} байт)")
-
-                # Позначаємо TTS запит як оброблений
-                processed_ids.add(msg_id)
-
-                # Відправляємо аудіо в чат
-                send_audio_to_chat(msg["chat_id"], audio, config)
-            elif verbose:
-                print(f"[Jasmine] Не вдалося згенерувати аудіо для: {text_to_speak[:50]}...")
 
     # Зберігаємо список оброблених повідомлень (навіть якщо нічого не відправлено)
     save_processed_messages(processed_ids)
