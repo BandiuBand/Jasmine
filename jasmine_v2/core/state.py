@@ -4,6 +4,7 @@ from typing import Any, Literal, TypedDict
 Scope = Literal["private", "family", "system", "unknown"]
 
 DayMemoryWriteStatus = Literal["dry_run", "skipped_no_primary_space", "pending", "written", "failed"]
+MemoryReadStatus = Literal["disabled", "skipped_no_plan", "ok", "empty", "failed"]
 Intent = Literal[
     "simple_chat",
     "memory_query",
@@ -32,8 +33,12 @@ class JasmineState(TypedDict, total=False):
     intent: Intent
     intent_confidence: float
 
+    # Config (passed from outside, not read from disk)
+    config: dict[str, Any]
+
     # Context/memory placeholder
     memory_context: list[dict[str, Any]]
+    memory_read_status: MemoryReadStatus
     conversation_context: list[dict[str, Any]]
 
     # Execution
