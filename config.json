@@ -108,7 +108,11 @@
   },
   "jasmine_v2": {
     "enabled": true,
-    "shadow_mode": true
+    "shadow_mode": true,
+    "memory": {
+      "day_write_enabled": true,
+      "read_enabled": false
+    }
   },
   "kg_watch": {
     "enabled": true
