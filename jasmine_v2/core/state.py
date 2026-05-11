@@ -2,6 +2,8 @@ from typing import Any, Literal, TypedDict
 
 
 Scope = Literal["private", "family", "system", "unknown"]
+
+DayMemoryWriteStatus = Literal["dry_run", "skipped_no_primary_space", "pending", "written", "failed"]
 Intent = Literal[
     "simple_chat",
     "memory_query",
@@ -49,3 +51,9 @@ class JasmineState(TypedDict, total=False):
 
     # Memory space
     primary_memory_space: dict[str, Any]
+
+    # Day memory dry run
+    day_memory_group_id: str
+    active_memory_group_ids: list[str]
+    retrieval_plan: dict[str, Any]
+    day_memory_write_status: DayMemoryWriteStatus
