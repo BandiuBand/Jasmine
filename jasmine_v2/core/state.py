@@ -62,3 +62,4 @@ class JasmineState(TypedDict, total=False):
     active_memory_group_ids: list[str]
     retrieval_plan: dict[str, Any]
     day_memory_write_status: DayMemoryWriteStatus
+    day_memory_write_result: dict[str, Any] | None
