@@ -26,6 +26,14 @@ def main():
     print("=== Jasmine v2 result ===")
     print(result.get("final_response", ""))
 
+    print("\n=== Memory ===")
+    primary_space = result.get("primary_memory_space", {})
+    print(f"primary_memory_space: {primary_space.get('key', 'N/A')}")
+    print(f"day_memory_group_id: {result.get('day_memory_group_id', 'N/A')}")
+    active_groups = result.get("active_memory_group_ids", [])
+    print(f"active_memory_group_ids: {active_groups} (count: {len(active_groups)})")
+    print(f"day_memory_write_status: {result.get('day_memory_write_status', 'N/A')}")
+
     print("\n=== Debug log ===")
     for line in result.get("debug_log", []):
         print(line)
