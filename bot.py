@@ -272,28 +272,28 @@ def main():
             sys.exit(1)
         return
 
-    # Звичайний запуск бота
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    def _build_app():
+        """Створює новий Application з усіма обробниками.
 
-    # Обробник команди /start
-    app.add_handler(CommandHandler("start", start_command))
-
-    # Обробник команди /voice для озвучки тексту
-    app.add_handler(CommandHandler("voice", voice_command))
-
-    # Обробник для голосових повідомлень
-    app.add_handler(MessageHandler(filters.VOICE, transcribe_voice))
-
-    # Обробник для текстових повідомлень (приватні чати і групи)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+        Application/HTTPXRequest прив'язується до event loop, який створює
+        run_polling(). Після виходу з run_polling() loop закривається, тож
+        для повторної спроби потрібен свіжий Application.
+        """
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CommandHandler("voice", voice_command))
+        app.add_handler(MessageHandler(filters.VOICE, transcribe_voice))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+        return app
 
     # Ініціалізація з повторними спробами при мережевих помилках
     max_retries = 5
     retry_delay = 5  # seconds
-    
+
     for attempt in range(max_retries):
         try:
             print("Bot is polling…")
+            app = _build_app()
             app.run_polling(allowed_updates=["message", "edited_message", "channel_post"])
             break  # If successful, exit the retry loop
         except Exception as e:
