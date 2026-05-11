@@ -46,3 +46,6 @@ class JasmineState(TypedDict, total=False):
     # Debug
     errors: list[str]
     debug_log: list[str]
+
+    # Memory space
+    primary_memory_space: dict[str, Any]
