@@ -8,7 +8,7 @@ from telegram import Update, Chat
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
 from telegram.request import HTTPXRequest
 
-from jasmine_v2.transport.telegram_shadow import run_telegram_shadow_event
+from jasmine_v2.transport.shadow_queue import enqueue as enqueue_v2_shadow
 
 # 1) Налаштування
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -129,20 +129,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             message = update.effective_message
             if message and message.text:
-                print("[Jasmine v2 shadow] calling run_telegram_shadow_event", flush=True)
-                run_telegram_shadow_event(
-                    chat_id=chat.id if chat else "unknown",
-                    user_id=user.id if user else "unknown",
-                    user_name=user.full_name if user else None,
-                    text=message.text,
-                    raw={
+                print("[Jasmine v2 shadow] enqueuing shadow event", flush=True)
+                enqueue_v2_shadow({
+                    "chat_id": chat.id if chat else "unknown",
+                    "user_id": user.id if user else "unknown",
+                    "user_name": user.full_name if user else None,
+                    "text": message.text,
+                    "raw": {
                         "message_id": message.message_id,
                         "chat_type": chat.type if chat else None,
                         "username": user.username if user else None,
                     },
-                )
+                })
         except Exception as exc:
-            print(f"[Jasmine v2 shadow] error: {exc}")
+            print(f"[Jasmine v2 shadow] enqueue error: {exc}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показує chat_id при команді /start"""

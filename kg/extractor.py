@@ -3,6 +3,8 @@ import re
 import requests
 from typing import Any, Dict, List
 
+from llm_lock import llm_lock
+
 _PROMPT = """\
 Проаналізуй повідомлення від "{sender}" в чаті "{chat}".
 
@@ -37,20 +39,21 @@ def extract(
     
     # Спроба основного LLM
     try:
-        resp = requests.post(
-            llm_url,
-            json={
-                "model": llm_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 20000,
-            },
-            timeout=450,
-        )
-        if not resp.ok:
-            print(f"[Extractor] LM Studio HTTP {resp.status_code} body: {resp.text[:500]}")
-        resp.raise_for_status()
-        resp_data = resp.json()
+        with llm_lock(label=f"lm_studio:{llm_model}"):
+            resp = requests.post(
+                llm_url,
+                json={
+                    "model": llm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 20000,
+                },
+                timeout=450,
+            )
+            if not resp.ok:
+                print(f"[Extractor] LM Studio HTTP {resp.status_code} body: {resp.text[:500]}")
+            resp.raise_for_status()
+            resp_data = resp.json()
         message = resp_data["choices"][0]["message"]
         content = (message.get("content") or "").strip()
         # Fallback for reasoning models (gpt-oss, etc.)
@@ -97,17 +100,18 @@ def extract(
         if fallback_url and fallback_model:
             print(f"[Extractor] Fallback to Ollama...")
             try:
-                resp = requests.post(
-                    fallback_url,
-                    json={
-                        "model": fallback_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "stream": False
-                    },
-                    timeout=450,
-                )
-                resp.raise_for_status()
-                content = resp.json()["message"]["content"].strip()
+                with llm_lock(label=f"ollama:{fallback_model}"):
+                    resp = requests.post(
+                        fallback_url,
+                        json={
+                            "model": fallback_model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "stream": False
+                        },
+                        timeout=450,
+                    )
+                    resp.raise_for_status()
+                    content = resp.json()["message"]["content"].strip()
 
                 # Strip markdown code fences if present
                 match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", content)

@@ -31,6 +31,7 @@ from kg.graphiti_client import (
     message_reference_time,
 )
 from web_search import web_search, should_search, format_search_context
+from llm_lock import llm_lock
 _CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
 _LOGS_DIR = os.path.join(_BASE_DIR, "logs")
 _PROCESSED_FILE = os.path.join(_BASE_DIR, "jasmine_processed.json")
@@ -578,24 +579,25 @@ def _lm_studio_chat(
         "\n[Жасмін]:",
         "\n[Jasmine]:",
     ]
-    response = requests.post(
-        lm_config["url"],
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.8,
-            "max_tokens": 20000,
-            "top_p": 0.9,
-            "stream": False,
-            "stop": stop_sequences,
-        },
-        timeout=timeout
-    )
-    response.raise_for_status()
-    result = response.json()
+    with llm_lock(label=f"lm_studio:{model}"):
+        response = requests.post(
+            lm_config["url"],
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.8,
+                "max_tokens": 20000,
+                "top_p": 0.9,
+                "stream": False,
+                "stop": stop_sequences,
+            },
+            timeout=timeout
+        )
+        response.raise_for_status()
+        result = response.json()
     return result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
@@ -660,22 +662,23 @@ def _call_llm_with_fallback(
     try:
         ollama_config = config["jasmine_filter"]["ollama"]
         fallback_model = ollama_config.get("fallback_model", ollama_config["model"])
-        
-        response = requests.post(
-            ollama_config["url"],
-            json={
-                "model": fallback_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "stream": False,
-                "temperature": temp
-            },
-            timeout=450
-        )
-        response.raise_for_status()
-        result = response.json()
+
+        with llm_lock(label=f"ollama:{fallback_model}"):
+            response = requests.post(
+                ollama_config["url"],
+                json={
+                    "model": fallback_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": False,
+                    "temperature": temp
+                },
+                timeout=450
+            )
+            response.raise_for_status()
+            result = response.json()
         content = result.get("message", {}).get("content", "")
         
         if content:
@@ -828,21 +831,22 @@ TTS OUTPUT RULE (applies to every response):
         try:
             ollama_config = config["jasmine_filter"]["ollama"]
             fallback_model = ollama_config.get("fallback_model", ollama_config["model"])
-            
-            response = requests.post(
-                ollama_config["url"],
-                json={
-                    "model": fallback_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "stream": False
-                },
-                timeout=450
-            )
-            response.raise_for_status()
-            result = response.json()
+
+            with llm_lock(label=f"ollama:{fallback_model}"):
+                response = requests.post(
+                    ollama_config["url"],
+                    json={
+                        "model": fallback_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "stream": False
+                    },
+                    timeout=450
+                )
+                response.raise_for_status()
+                result = response.json()
             
             content = result.get("message", {}).get("content", "")
             
@@ -900,17 +904,18 @@ def detect_tts_request_llm(text: str, config: dict) -> Tuple[bool, Optional[str]
 Поверни ТІЛЬКИ JSON, без пояснень."""
 
     try:
-        response = requests.post(
-            ollama_config["url"],
-            json={
-                "model": ollama_config["model"],
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False
-            },
-            timeout=450
-        )
-        response.raise_for_status()
-        result = response.json()
+        with llm_lock(label=f"ollama:{ollama_config['model']}"):
+            response = requests.post(
+                ollama_config["url"],
+                json={
+                    "model": ollama_config["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False
+                },
+                timeout=450
+            )
+            response.raise_for_status()
+            result = response.json()
 
         content = result.get("message", {}).get("content", "{}")
 
@@ -1596,7 +1601,51 @@ def process_messages(config: dict, verbose: bool = True) -> Dict:
     save_processed_messages(processed_ids)
     save_context_state(context_state)
 
+    # Дренуємо чергу v2 shadow подій ПІСЛЯ повного циклу v1.
+    # Це гарантує, що для одного й того ж повідомлення v1 завершується
+    # раніше за v2, і виключає паралельні LLM-виклики між версіями.
+    _drain_v2_shadow(verbose=verbose, stats=stats)
+
     return stats
+
+
+def _drain_v2_shadow(verbose: bool, stats: Dict) -> None:
+    """Запускає накопичені v2 shadow події послідовно після v1-циклу."""
+    try:
+        from jasmine_v2.transport.shadow_queue import drain as drain_v2_shadow_queue
+        from jasmine_v2.transport.telegram_shadow import run_telegram_shadow_event
+    except Exception as exc:
+        if verbose:
+            print(f"[Jasmine v2 shadow] import error: {exc}")
+        return
+
+    try:
+        pending = drain_v2_shadow_queue()
+    except Exception as exc:
+        if verbose:
+            print(f"[Jasmine v2 shadow] drain error: {exc}")
+        return
+
+    if not pending:
+        return
+
+    stats["v2_shadow_runs"] = stats.get("v2_shadow_runs", 0)
+    if verbose:
+        print(f"[Jasmine v2 shadow] draining {len(pending)} pending event(s)")
+
+    for item in pending:
+        try:
+            run_telegram_shadow_event(
+                chat_id=item.get("chat_id", "unknown"),
+                user_id=item.get("user_id", "unknown"),
+                user_name=item.get("user_name"),
+                text=item.get("text", ""),
+                raw=item.get("raw") or {},
+            )
+            stats["v2_shadow_runs"] += 1
+        except Exception as exc:
+            if verbose:
+                print(f"[Jasmine v2 shadow] run error: {exc}")
 
 
 def run_watch(config: dict):
