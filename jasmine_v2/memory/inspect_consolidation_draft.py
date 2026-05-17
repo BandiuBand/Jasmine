@@ -66,7 +66,7 @@ def inspect_consolidation_draft(
 ) -> str:
     """Inspect consolidation draft and return formatted output string."""
     resolved_group_id = resolve_group_id(group_id, space_str, date_str)
-    client = client or GraphitiHttpClient()
+    client = client or GraphitiHttpClient(timeout=120.0)
 
     result = client.consolidation_draft(
         resolved_group_id,
