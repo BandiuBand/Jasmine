@@ -267,3 +267,54 @@ class GraphitiHttpClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def snapshot_draft(
+        self,
+        group_id: str,
+        *,
+        episode_limit: int = 500,
+        entity_limit: int = 500,
+        edge_limit: int = 500,
+        include_raw_episodes: bool = True,
+        mode: str = "raw",
+    ) -> dict:
+        """Request a snapshot draft for a group.
+
+        Args:
+            group_id: Group ID to snapshot. Cannot be empty.
+            episode_limit: Maximum number of episodes to include. Default is 500.
+            entity_limit: Maximum number of entities to include. Default is 500.
+            edge_limit: Maximum number of edges to include. Default is 500.
+            include_raw_episodes: Whether to include raw episode content. Default is True.
+            mode: Snapshot mode. Only "raw" is currently supported. Default is "raw".
+
+        Returns:
+            Response dict from the service containing group_id, mode, counts,
+            draft_text, and source.
+
+        Raises:
+            ValueError: If group_id is empty or mode is not "raw".
+            requests.HTTPError: If the request fails.
+        """
+        if not group_id:
+            raise ValueError("group_id cannot be empty")
+        if mode != "raw":
+            raise ValueError(f"mode must be 'raw', got: {mode!r}")
+
+        encoded_group_id = quote(group_id, safe="")
+
+        payload = {
+            "episode_limit": episode_limit,
+            "entity_limit": entity_limit,
+            "edge_limit": edge_limit,
+            "include_raw_episodes": include_raw_episodes,
+            "mode": mode,
+        }
+
+        response = requests.post(
+            f"{self.base_url}/groups/{encoded_group_id}/snapshot/draft",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()

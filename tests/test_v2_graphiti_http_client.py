@@ -511,6 +511,125 @@ def test_group_stats_http_error_raises(mock_get):
         print(f"  group_stats HTTP error properly raised: {e}")
 
 
+@patch("jasmine_v2.memory.graphiti_http_client.requests.post")
+def test_snapshot_draft_calls_correct_url_and_payload(mock_post):
+    """Test snapshot_draft() POST /groups/{group_id}/snapshot/draft with correct payload."""
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "group_id": "jv2-chat-test-day-2026-05-10",
+        "mode": "raw",
+        "counts": {"episodes": 2, "entities": 3, "edges": 1, "mentions": 4},
+        "draft_text": "draft content",
+        "source": {"episodes": 2, "entities": 3, "edges": 1, "mentions": 4},
+    }
+    mock_post.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    result = client.snapshot_draft(
+        group_id="jv2-chat-test-day-2026-05-10",
+        episode_limit=100,
+        entity_limit=200,
+        edge_limit=300,
+        include_raw_episodes=False,
+    )
+
+    mock_post.assert_called_once_with(
+        "http://127.0.0.1:8088/groups/jv2-chat-test-day-2026-05-10/snapshot/draft",
+        json={
+            "episode_limit": 100,
+            "entity_limit": 200,
+            "edge_limit": 300,
+            "include_raw_episodes": False,
+            "mode": "raw",
+        },
+        timeout=30.0,
+    )
+    mock_response.raise_for_status.assert_called_once()
+    assert result["mode"] == "raw"
+    assert result["draft_text"] == "draft content"
+    print("  snapshot_draft() POST URL and payload correct")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.post")
+def test_snapshot_draft_url_encodes_group_id(mock_post):
+    """Test snapshot_draft() properly URL-encodes the group_id."""
+    mock_response = Mock()
+    mock_response.json.return_value = {"group_id": "jv2-chat-hello world"}
+    mock_post.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    client.snapshot_draft("jv2-chat-hello world-day-2026-05-10")
+
+    call_args = mock_post.call_args
+    url = call_args[0][0]
+    assert "hello%20world" in url
+    assert "/snapshot/draft" in url
+    print(f"  snapshot_draft() encodes spaces: {url}")
+
+
+def test_snapshot_draft_blocks_empty_group_id():
+    """Test snapshot_draft() blocks empty group_id."""
+    client = GraphitiHttpClient()
+
+    try:
+        client.snapshot_draft("")
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "empty" in str(e).lower()
+        print(f"  snapshot_draft() blocks empty group_id: {e}")
+
+
+def test_snapshot_draft_blocks_invalid_mode():
+    """Test snapshot_draft() blocks invalid mode."""
+    client = GraphitiHttpClient()
+
+    try:
+        client.snapshot_draft("jv2-chat-test", mode="full")
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "raw" in str(e)
+        print(f"  snapshot_draft() blocks invalid mode: {e}")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.post")
+def test_snapshot_draft_http_error_raises(mock_post):
+    """Test snapshot_draft HTTP error raises."""
+    from requests import HTTPError
+
+    mock_response = Mock()
+    mock_response.raise_for_status.side_effect = HTTPError("500 Server Error")
+    mock_post.return_value = mock_response
+
+    client = GraphitiHttpClient()
+
+    try:
+        client.snapshot_draft("jv2-chat-test-day-2026-05-10")
+        assert False, "Should have raised HTTPError"
+    except HTTPError as e:
+        print(f"  snapshot_draft HTTP error properly raised: {e}")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.post")
+def test_snapshot_draft_returns_json(mock_post):
+    """Test snapshot_draft() returns parsed JSON response."""
+    expected = {
+        "group_id": "jv2-chat-test-day-2026-05-10",
+        "mode": "raw",
+        "counts": {"episodes": 5, "entities": 4, "edges": 3, "mentions": 6},
+        "draft_text": "Snapshot draft text",
+        "source": {"episodes": 5, "entities": 4, "edges": 3, "mentions": 6},
+    }
+    mock_response = Mock()
+    mock_response.json.return_value = expected
+    mock_post.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    result = client.snapshot_draft("jv2-chat-test-day-2026-05-10")
+
+    assert result == expected
+    print("  snapshot_draft() returns correct JSON")
+
+
 def test_custom_timeout():
     """Test custom timeout is applied."""
     client = GraphitiHttpClient(timeout=60.0)
@@ -562,6 +681,12 @@ def run_all_tests():
         test_search_http_error_raises,
         test_list_episodes_http_error_raises,
         test_group_stats_http_error_raises,
+        test_snapshot_draft_calls_correct_url_and_payload,
+        test_snapshot_draft_url_encodes_group_id,
+        test_snapshot_draft_blocks_empty_group_id,
+        test_snapshot_draft_blocks_invalid_mode,
+        test_snapshot_draft_http_error_raises,
+        test_snapshot_draft_returns_json,
         test_custom_timeout,
         test_timeout_applied_to_request,
     ]
