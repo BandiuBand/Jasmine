@@ -93,7 +93,7 @@ def test_add_episode(mock_post):
     result = client.add_episode(
         name="Test Episode",
         body="Test body content",
-        group_id="jv2:chat:test:day:2026-05-10",
+        group_id="jv2-chat-test-day-2026-05-10",
     )
 
     mock_post.assert_called_once_with(
@@ -101,7 +101,7 @@ def test_add_episode(mock_post):
         json={
             "name": "Test Episode",
             "body": "Test body content",
-            "group_id": "jv2:chat:test:day:2026-05-10",
+            "group_id": "jv2-chat-test-day-2026-05-10",
             "source_description": "Jasmine v2 memory",
         },
         timeout=30.0
@@ -122,7 +122,7 @@ def test_add_episode_with_reference_time(mock_post):
     result = client.add_episode(
         name="Test Episode",
         body="Test body",
-        group_id="jv2:chat:test:day:2026-05-10",
+        group_id="jv2-chat-test-day-2026-05-10",
         reference_time=ref_time,
     )
 
@@ -140,11 +140,11 @@ def test_add_episode_blocks_legacy_group_id():
         client.add_episode(
             name="Test",
             body="Test body",
-            group_id="family",  # legacy group_id without jv2: prefix
+            group_id="family",  # legacy group_id without jv2- prefix
         )
         assert False, "Should have raised ValueError"
     except ValueError as e:
-        assert "jv2:" in str(e)
+        assert "jv2-" in str(e)
         print(f"  add_episode() blocks legacy group_id: {e}")
 
 
@@ -158,14 +158,14 @@ def test_search(mock_post):
     client = GraphitiHttpClient()
     result = client.search(
         query="test query",
-        group_ids=["jv2:chat:test:day:2026-05-10"],
+        group_ids=["jv2-chat-test-day-2026-05-10"],
     )
 
     mock_post.assert_called_once_with(
         "http://127.0.0.1:8088/search",
         json={
             "query": "test query",
-            "group_ids": ["jv2:chat:test:day:2026-05-10"],
+            "group_ids": ["jv2-chat-test-day-2026-05-10"],
             "limit": 10,
             "include_episodes": True,
         },
@@ -186,8 +186,8 @@ def test_search_with_multiple_group_ids(mock_post):
     client.search(
         query="test",
         group_ids=[
-            "jv2:chat:test:day:2026-05-10",
-            "jv2:chat:test:week:2026-W19",
+            "jv2-chat-test-day-2026-05-10",
+            "jv2-chat-test-week-2026-W19",
         ],
         limit=5,
         include_episodes=False,
@@ -195,8 +195,8 @@ def test_search_with_multiple_group_ids(mock_post):
 
     call_args = mock_post.call_args
     assert call_args[1]["json"]["group_ids"] == [
-        "jv2:chat:test:day:2026-05-10",
-        "jv2:chat:test:week:2026-W19",
+        "jv2-chat-test-day-2026-05-10",
+        "jv2-chat-test-week-2026-W19",
     ]
     assert call_args[1]["json"]["limit"] == 5
     assert call_args[1]["json"]["include_episodes"] is False
@@ -224,7 +224,7 @@ def test_list_episodes(mock_get):
 
     client = GraphitiHttpClient()
     result = client.list_episodes(
-        group_id="jv2:chat:test:day:2026-05-10",
+        group_id="jv2-chat-test-day-2026-05-10",
         limit=50,
         offset=10,
         order="desc",
@@ -233,7 +233,7 @@ def test_list_episodes(mock_get):
     mock_get.assert_called_once_with(
         "http://127.0.0.1:8088/episodes",
         params={
-            "group_id": "jv2:chat:test:day:2026-05-10",
+            "group_id": "jv2-chat-test-day-2026-05-10",
             "limit": 50,
             "offset": 10,
             "order": "desc",
@@ -264,15 +264,15 @@ def test_group_stats(mock_get):
     mock_get.return_value = mock_response
 
     client = GraphitiHttpClient()
-    result = client.group_stats("jv2:chat:test:day:2026-05-10")
+    result = client.group_stats("jv2-chat-test-day-2026-05-10")
 
     # Check the URL contains encoded group_id
     call_args = mock_get.call_args
     url = call_args[0][0]
     assert "/groups/" in url
     assert "/stats" in url
-    # The group_id should be URL-encoded (colons become %3A)
-    assert "jv2%3Achat%3Atest%3Aday%3A2026-05-10" in url
+    # With dash format, no special chars need encoding in this example
+    assert "jv2-chat-test-day-2026-05-10" in url
     assert result == {"count": 42}
     print(f"  group_stats() URL encodes group_id: {url}")
 
@@ -285,7 +285,7 @@ def test_group_stats_with_special_chars(mock_get):
     mock_get.return_value = mock_response
 
     client = GraphitiHttpClient()
-    result = client.group_stats("jv2:chat:hello world:day:2026-05-10")
+    result = client.group_stats("jv2-chat-hello world-day-2026-05-10")
 
     call_args = mock_get.call_args
     url = call_args[0][0]
@@ -304,6 +304,117 @@ def test_group_stats_blocks_empty_group_id():
     except ValueError as e:
         assert "empty" in str(e).lower()
         print(f"  group_stats() blocks empty group_id: {e}")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.get")
+def test_group_graph_calls_correct_url_and_params(mock_get):
+    """Test group_graph() GET /groups/{group_id}/graph with correct params."""
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "group_id": "jv2-chat-test-day-2026-05-10",
+        "episodes": [],
+        "entities": [],
+        "edges": [],
+        "mentions": [],
+        "counts": {},
+        "limits": {},
+    }
+    mock_get.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    result = client.group_graph(
+        group_id="jv2-chat-test-day-2026-05-10",
+        episode_limit=100,
+        entity_limit=200,
+        edge_limit=300,
+        include_content=False,
+        include_embeddings=True,
+    )
+
+    mock_get.assert_called_once_with(
+        "http://127.0.0.1:8088/groups/jv2-chat-test-day-2026-05-10/graph",
+        params={
+            "episode_limit": 100,
+            "entity_limit": 200,
+            "edge_limit": 300,
+            "include_content": False,
+            "include_embeddings": True,
+        },
+        timeout=30.0,
+    )
+    mock_response.raise_for_status.assert_called_once()
+    assert result["group_id"] == "jv2-chat-test-day-2026-05-10"
+    print("  group_graph() GET /groups/{group_id}/graph params correct")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.get")
+def test_group_graph_url_encodes_group_id(mock_get):
+    """Test group_graph() properly URL-encodes the group_id."""
+    mock_response = Mock()
+    mock_response.json.return_value = {"group_id": "jv2-chat-hello world"}
+    mock_get.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    client.group_graph("jv2-chat-hello world-day-2026-05-10")
+
+    call_args = mock_get.call_args
+    url = call_args[0][0]
+    assert "hello%20world" in url
+    assert "/graph" in url
+    print(f"  group_graph() encodes spaces: {url}")
+
+
+def test_group_graph_blocks_empty_group_id():
+    """Test group_graph() blocks empty group_id."""
+    client = GraphitiHttpClient()
+
+    try:
+        client.group_graph("")
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "empty" in str(e).lower()
+        print(f"  group_graph() blocks empty group_id: {e}")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.get")
+def test_group_graph_http_error_raises(mock_get):
+    """Test group_graph HTTP error raises."""
+    from requests import HTTPError
+
+    mock_response = Mock()
+    mock_response.raise_for_status.side_effect = HTTPError("404 Not Found")
+    mock_get.return_value = mock_response
+
+    client = GraphitiHttpClient()
+
+    try:
+        client.group_graph("jv2-chat-test-day-2026-05-10")
+        assert False, "Should have raised HTTPError"
+    except HTTPError as e:
+        print(f"  group_graph HTTP error properly raised: {e}")
+
+
+@patch("jasmine_v2.memory.graphiti_http_client.requests.get")
+def test_group_graph_returns_json(mock_get):
+    """Test group_graph() returns parsed JSON response."""
+    expected = {
+        "group_id": "jv2-chat-test-day-2026-05-10",
+        "episodes": [{"uuid": "ep-1"}],
+        "entities": [{"name": "Alice"}],
+        "edges": [{"uuid": "edge-1"}],
+        "mentions": [{"entity_uuid": "ent-1", "episode_uuid": "ep-1"}],
+        "counts": {"episodes": 1, "entities": 1, "edges": 1},
+        "limits": {"episode_limit": 500, "entity_limit": 500, "edge_limit": 500},
+    }
+    mock_response = Mock()
+    mock_response.json.return_value = expected
+    mock_get.return_value = mock_response
+
+    client = GraphitiHttpClient()
+    result = client.group_graph("jv2-chat-test-day-2026-05-10")
+
+    assert result == expected
+    print("  group_graph() returns correct JSON")
 
 
 @patch("jasmine_v2.memory.graphiti_http_client.requests.get")
@@ -339,7 +450,7 @@ def test_add_episode_http_error_raises(mock_post):
         client.add_episode(
             name="Test",
             body="Body",
-            group_id="jv2:chat:test:day:2026-05-10",
+            group_id="jv2-chat-test-day-2026-05-10",
         )
         assert False, "Should have raised HTTPError"
     except HTTPError as e:
@@ -358,7 +469,7 @@ def test_search_http_error_raises(mock_post):
     client = GraphitiHttpClient()
 
     try:
-        client.search(query="test", group_ids=["jv2:chat:test"])
+        client.search(query="test", group_ids=["jv2-chat-test"])
         assert False, "Should have raised HTTPError"
     except HTTPError as e:
         print(f"  search HTTP error properly raised: {e}")
@@ -376,7 +487,7 @@ def test_list_episodes_http_error_raises(mock_get):
     client = GraphitiHttpClient()
 
     try:
-        client.list_episodes(group_id="jv2:chat:test:day:2026-05-10")
+        client.list_episodes(group_id="jv2-chat-test-day-2026-05-10")
         assert False, "Should have raised HTTPError"
     except HTTPError as e:
         print(f"  list_episodes HTTP error properly raised: {e}")
@@ -394,7 +505,7 @@ def test_group_stats_http_error_raises(mock_get):
     client = GraphitiHttpClient()
 
     try:
-        client.group_stats("jv2:chat:test:day:2026-05-10")
+        client.group_stats("jv2-chat-test-day-2026-05-10")
         assert False, "Should have raised HTTPError"
     except HTTPError as e:
         print(f"  group_stats HTTP error properly raised: {e}")
@@ -441,6 +552,11 @@ def run_all_tests():
         test_group_stats,
         test_group_stats_with_special_chars,
         test_group_stats_blocks_empty_group_id,
+        test_group_graph_calls_correct_url_and_params,
+        test_group_graph_url_encodes_group_id,
+        test_group_graph_blocks_empty_group_id,
+        test_group_graph_http_error_raises,
+        test_group_graph_returns_json,
         test_http_error_raises,
         test_add_episode_http_error_raises,
         test_search_http_error_raises,

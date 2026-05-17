@@ -79,7 +79,7 @@ class GraphitiHttpClient:
         Args:
             name: Episode name/title.
             body: Episode content/body.
-            group_id: Target group ID. Must start with "jv2:".
+            group_id: Target group ID. Must start with "jv2-".
             source_description: Source description for the episode.
             reference_time: Optional reference datetime. Defaults to current time.
 
@@ -87,12 +87,12 @@ class GraphitiHttpClient:
             Response dict from the service.
 
         Raises:
-            ValueError: If group_id doesn't start with "jv2:".
+            ValueError: If group_id doesn't start with "jv2-".
             requests.HTTPError: If the request fails.
         """
-        if not group_id.startswith("jv2:"):
+        if not group_id.startswith("jv2-"):
             raise ValueError(
-                f"group_id must start with 'jv2:', got: {group_id!r}"
+                f"group_id must start with 'jv2-', got: {group_id!r}"
             )
 
         payload = {
@@ -214,6 +214,55 @@ class GraphitiHttpClient:
 
         response = requests.get(
             f"{self.base_url}/groups/{encoded_group_id}/stats",
+            timeout=self.timeout
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def group_graph(
+        self,
+        group_id: str,
+        *,
+        episode_limit: int = 500,
+        entity_limit: int = 500,
+        edge_limit: int = 500,
+        include_content: bool = True,
+        include_embeddings: bool = False,
+    ) -> dict:
+        """Get the full graph for a group.
+
+        Args:
+            group_id: Group ID to retrieve graph for. Cannot be empty.
+            episode_limit: Maximum number of episodes to include. Default is 500.
+            entity_limit: Maximum number of entities to include. Default is 500.
+            edge_limit: Maximum number of edges to include. Default is 500.
+            include_content: Whether to include content. Default is True.
+            include_embeddings: Whether to include embeddings. Default is False.
+
+        Returns:
+            Graph dict from the service containing episodes, entities, edges,
+            mentions, counts, and limits.
+
+        Raises:
+            ValueError: If group_id is empty.
+            requests.HTTPError: If the request fails.
+        """
+        if not group_id:
+            raise ValueError("group_id cannot be empty")
+
+        encoded_group_id = quote(group_id, safe="")
+
+        params = {
+            "episode_limit": episode_limit,
+            "entity_limit": entity_limit,
+            "edge_limit": edge_limit,
+            "include_content": include_content,
+            "include_embeddings": include_embeddings,
+        }
+
+        response = requests.get(
+            f"{self.base_url}/groups/{encoded_group_id}/graph",
+            params=params,
             timeout=self.timeout
         )
         response.raise_for_status()
